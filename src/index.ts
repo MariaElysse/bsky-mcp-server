@@ -1059,9 +1059,16 @@ server.tool(
   {
     user: z.string().describe("The handle or DID of the user (e.g., alice.bsky.social)"),
     count: z.number().min(1).max(500).describe("Number of posts to fetch or hours to look back"),
-    type: z.enum(["posts", "hours"]).describe("Whether count represents number of posts or hours to look back")
+    type: z.enum(["posts", "hours"]).describe("Whether count represents number of posts or hours to look back"),
+    filter: z.enum([
+      "posts_with_replies",
+      "posts_no_replies",
+      "posts_and_author_threads",
+      "posts_with_media",
+      "posts_with_video"
+    ]).default("posts_with_replies").describe("Filter posts by type. Default includes replies. Options: posts_with_replies (all posts including replies), posts_no_replies (exclude replies), posts_and_author_threads (posts and self-reply threads), posts_with_media (only posts with media), posts_with_video (only posts with video)")
   },
-  async ({ user, count, type }) => {
+  async ({ user, count, type, filter }) => {
     if (!agent) {
       return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
     }
@@ -1091,10 +1098,11 @@ server.tool(
           // Calculate how many posts to fetch in this batch
           const batchLimit = 100;
           
-          const response = await currentAgent.app.bsky.feed.getAuthorFeed({ 
+          const response = await currentAgent.app.bsky.feed.getAuthorFeed({
             actor: profileResponse.data.did,
             limit: batchLimit,
-            cursor: nextCursor
+            cursor: nextCursor,
+            filter: filter
           });
           
           if (!response.success) {
