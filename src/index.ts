@@ -243,12 +243,28 @@ server.tool(
           }
           
           const threadPost = cidResponse.data.thread as any;
-          const parentCid = threadPost.post.cid;
-          
+          const parentPost = threadPost.post;
+          const parentCid = parentPost.cid;
+          const parentRecord = parentPost.record;
+
+          // Determine the root - if parent is a reply, use its root, otherwise parent is the root
+          let rootUri: string;
+          let rootCid: string;
+
+          if (parentRecord.reply) {
+            // Parent is a reply - use its root
+            rootUri = parentRecord.reply.root.uri;
+            rootCid = parentRecord.reply.root.cid;
+          } else {
+            // Parent is a top-level post - it IS the root
+            rootUri = replyTo;
+            rootCid = parentCid;
+          }
+
           // Add reply information to the record
           record.reply = {
             parent: { uri: replyTo, cid: parentCid },
-            root: { uri: replyTo, cid: parentCid }
+            root: { uri: rootUri, cid: rootCid }
           };
 
         } catch (error) {
