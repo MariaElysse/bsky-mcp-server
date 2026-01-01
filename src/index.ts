@@ -2,21 +2,23 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { AtpAgent } from "@atproto/api";
+import { AtpAgent, RichText } from "@atproto/api";
 import * as dotenv from "dotenv";
-import {  
+import {
   cleanHandle,
-  formatSummaryText, 
-  getFeedNameFromId, 
+  formatSummaryText,
+  getFeedNameFromId,
   validateUri,
   McpErrorResponse,
   McpSuccessResponse,
   escapeXml,
-  convertBskyUrlToAtUri
+  convertBskyUrlToAtUri,
+  extractFirstUrl
 } from './utils.js';
 import { preprocessPosts, formatPostThread } from "./llm-preprocessor.js";
 import { registerResources, resourcesList } from './resources.js';
 import { registerPrompts } from './prompts.js';
+import { fetchLinkMetadata, uploadThumbnail } from './link-preview.js';
 
 // Load environment variables
 dotenv.config({ path: '.env' });
@@ -215,17 +217,28 @@ server.tool(
   {
     text: z.string().max(300).describe("The content of your post"),
     replyTo: z.string().optional().describe("Optional URI of post to reply to"),
+    previewUrl: z.string().url().optional().describe("Optional URL to generate preview card for. If not provided, uses first URL detected in text."),
+    embedPreview: z.boolean().optional().default(true).describe("Whether to fetch and attach a link preview card. Defaults to true."),
   },
-  async ({ text, replyTo }) => {
+  async ({ text, replyTo, previewUrl, embedPreview = true }) => {
     if (!agent) {
       return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
     }
 
     try {
+      // Detect facets using RichText
+      const rt = new RichText({ text });
+      await rt.detectFacets(agent);
+
       const record: any = {
-        text,
+        text: rt.text,
         createdAt: new Date().toISOString(),
       };
+
+      // Add facets if any were detected
+      if (rt.facets && rt.facets.length > 0) {
+        record.facets = rt.facets;
+      }
 
       let replyRef;
       if (replyTo) {
@@ -253,6 +266,36 @@ server.tool(
 
         } catch (error) {
           return mcpErrorResponse(`Error parsing reply URI: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      // Generate link preview embed if enabled
+      if (embedPreview) {
+        const urlToPreview = previewUrl || extractFirstUrl(text);
+
+        if (urlToPreview) {
+          const metadata = await fetchLinkMetadata(urlToPreview);
+
+          if (metadata) {
+            const externalEmbed: any = {
+              $type: 'app.bsky.embed.external',
+              external: {
+                uri: metadata.url,
+                title: metadata.title,
+                description: metadata.description,
+              },
+            };
+
+            // Try to upload thumbnail if image URL exists
+            if (metadata.imageUrl) {
+              const thumbBlob = await uploadThumbnail(agent, metadata.imageUrl);
+              if (thumbBlob) {
+                externalEmbed.external.thumb = thumbBlob;
+              }
+            }
+
+            record.embed = externalEmbed;
+          }
         }
       }
 
