@@ -18,7 +18,7 @@ export async function fetchLinkMetadata(url: string): Promise<LinkMetadata | nul
         'User-Agent': 'Bluesky MCP Server/1.0',
         'Accept': 'text/html',
       },
-      signal: AbortSignal.timeout(5000), // 5 second timeout
+      signal: AbortSignal.timeout(15000), // 15 second timeout
     });
 
     if (!response.ok) {
@@ -112,7 +112,7 @@ export async function uploadThumbnail(
       headers: {
         'User-Agent': 'Bluesky MCP Server/1.0',
       },
-      signal: AbortSignal.timeout(10000), // 10 second timeout for images
+      signal: AbortSignal.timeout(20000), // 20 second timeout for images
     });
 
     if (!response.ok) {
