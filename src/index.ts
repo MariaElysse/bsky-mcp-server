@@ -210,6 +210,83 @@ server.tool(
 );
 
 server.tool(
+  "get-notifications",
+  "Fetch your notifications from Bluesky, optionally filtered by type (reply, mention, like, repost, follow, quote)",
+  {
+    limit: z.number().min(1).max(500).default(50).describe("Number of notifications to fetch (1-500)"),
+    reasons: z.array(z.enum([
+      "like",
+      "repost",
+      "follow",
+      "mention",
+      "reply",
+      "quote",
+      "starterpack-joined"
+    ])).optional().describe("Filter by notification types (e.g., ['reply', 'mention']). If not provided, returns all types.")
+  },
+  async ({ limit, reasons }) => {
+    if (!agent) {
+      return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
+    }
+
+    try {
+      const MAX_NOTIFICATIONS = 500; // Safety limit
+      let allNotifications: any[] = [];
+      let nextCursor: string | undefined = undefined;
+      let shouldContinueFetching = true;
+
+      while (shouldContinueFetching && allNotifications.length < MAX_NOTIFICATIONS) {
+        const batchLimit = Math.min(100, limit - allNotifications.length);
+
+        const response = await agent.app.bsky.notification.listNotifications({
+          limit: batchLimit,
+          cursor: nextCursor,
+          reasons: reasons
+        });
+
+        if (!response.success) {
+          break;
+        }
+
+        const { notifications, cursor } = response.data;
+        allNotifications = allNotifications.concat(notifications);
+        nextCursor = cursor;
+
+        // Stop if we have enough or no more results
+        shouldContinueFetching = allNotifications.length < limit && !!cursor;
+      }
+
+      // Limit to requested count
+      const finalNotifications = allNotifications.slice(0, limit);
+
+      if (finalNotifications.length === 0) {
+        const filterDesc = reasons ? ` with filter: ${reasons.join(', ')}` : '';
+        return mcpSuccessResponse(`No notifications found${filterDesc}.`);
+      }
+
+      // Format notifications output
+      let output = `Retrieved ${finalNotifications.length} notification(s):\n\n`;
+
+      for (const notif of finalNotifications) {
+        const displayName = notif.author.displayName || notif.author.handle;
+        output += `[${notif.reason.toUpperCase()}] ${displayName} (@${notif.author.handle})\n`;
+        output += `  URI: ${notif.uri}\n`;
+        output += `  Time: ${notif.indexedAt}\n`;
+        output += `  Read: ${notif.isRead}\n`;
+        if (notif.reasonSubject) {
+          output += `  Subject: ${notif.reasonSubject}\n`;
+        }
+        output += `\n`;
+      }
+
+      return mcpSuccessResponse(output);
+    } catch (error) {
+      return mcpErrorResponse(`Error fetching notifications: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+);
+
+server.tool(
   "create-post",
   "Create a new post on Bluesky",
   {
