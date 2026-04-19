@@ -179,12 +179,27 @@ export function registerTools(server: McpServer, getAgent: AgentProvider): void 
             }
 
             const threadPost = cidResponse.data.thread as any;
-            const parentCid = threadPost.post.cid;
+            const parentPost = threadPost.post;
+            const parentCid = parentPost.cid;
+            const parentRecord = parentPost.record;
 
-            // Add reply information to the record
+            // Determine the root — if parent is a reply, use its root;
+            // otherwise the parent IS the root. Setting both to the parent
+            // when replying to a nested reply breaks thread rendering in
+            // the Bluesky web UI.
+            let rootUri: string;
+            let rootCid: string;
+            if (parentRecord.reply) {
+              rootUri = parentRecord.reply.root.uri;
+              rootCid = parentRecord.reply.root.cid;
+            } else {
+              rootUri = replyTo;
+              rootCid = parentCid;
+            }
+
             record.reply = {
               parent: { uri: replyTo, cid: parentCid },
-              root: { uri: replyTo, cid: parentCid }
+              root: { uri: rootUri, cid: rootCid }
             };
 
           } catch (error) {
