@@ -277,6 +277,68 @@ async function testCallbackExpiredStateIsRejected() {
   }
 }
 
+async function testCallbackPreservesStateBytesForMisEncodingClients() {
+  // Regression: a real-world MCP client generated state with base64 `+`
+  // chars and URL-encoded them as `%20` instead of `%2B`. That meant the
+  // state we received from them contained literal spaces, and when we
+  // echoed it back in the redirect using URLSearchParams (which form-
+  // encodes spaces as `+`), their client saw the bytes change between
+  // what it sent and what we returned, and rejected the callback with
+  // "no OAuth flow in progress". Verify our redirect preserves state
+  // byte-for-byte via `%20` encoding.
+  const { baseUrl, stop } = await startApp();
+  try {
+    const regRes = await req(`${baseUrl}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        client_name: "Space Client",
+        redirect_uris: ["http://localhost:9999/callback"],
+        token_endpoint_auth_method: "none",
+      }),
+    });
+    const clientId = (await regRes.json() as any).client_id as string;
+
+    const codeVerifier = randomBytes(32).toString("base64url");
+    const codeChallenge = s256(codeVerifier);
+    const quirkyState = "abc  def";  // contains two literal spaces
+
+    const authUrl = new URL(`${baseUrl}/authorize`);
+    authUrl.searchParams.set("response_type", "code");
+    authUrl.searchParams.set("client_id", clientId);
+    authUrl.searchParams.set("redirect_uri", "http://localhost:9999/callback");
+    authUrl.searchParams.set("code_challenge", codeChallenge);
+    authUrl.searchParams.set("code_challenge_method", "S256");
+    authUrl.searchParams.set("state", quirkyState);
+
+    const authRes = await req(authUrl.toString());
+    assert.equal(authRes.status, 200);
+    const stateKey = (await authRes.text()).match(/name="state"\s+value="([^"]+)"/)![1];
+
+    const loginRes = await req(`${baseUrl}/oauth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ state: stateKey, handle: "alice.test" }).toString(),
+    });
+    assert.equal(loginRes.status, 302);
+
+    const cbRes = await req(`${baseUrl}/oauth/callback?state=${encodeURIComponent(stateKey)}&code=unused`);
+    assert.equal(cbRes.status, 302);
+
+    const loc = cbRes.headers.get("location")!;
+    // The redirect must preserve the client's original state byte-for-byte.
+    // encodeURIComponent emits %20 for space; URLSearchParams would have
+    // emitted '+'. We want %20 so round-tripping gives the client back
+    // exactly "abc  def".
+    assert.ok(loc.includes("state=abc%20%20def"),
+      `redirect must use %20 for space, not '+'; got: ${loc}`);
+    assert.equal(new URL(loc).searchParams.get("state"), quirkyState,
+      "decoded state must match original");
+  } finally {
+    await stop();
+  }
+}
+
 // -----------------------------------------------------------------------------
 
 async function main() {
@@ -287,6 +349,7 @@ async function main() {
     ["DCR registers a client and returns its client_id", testDcrRegistersAClient],
     ["full flow: DCR → /authorize → login → callback → /token (+ refresh)", testFullAuthCodeFlow],
     ["callback with unknown state is rejected", testCallbackExpiredStateIsRejected],
+    ["callback preserves state bytes for mis-encoding clients", testCallbackPreservesStateBytesForMisEncodingClients],
   ];
 
   let failed = 0;
