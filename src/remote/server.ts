@@ -42,6 +42,13 @@ export function buildApp(config: ServerConfig): Express {
   const publicUrl = new URL(config.publicUrl);
 
   const app = express();
+  // We're always behind a reverse proxy on loopback (Caddy → 127.0.0.1:PORT
+  // in the reference deploy). Without this, express-rate-limit inside
+  // mcpAuthRouter warns loudly on every request because it sees
+  // X-Forwarded-For but can't trust it. Restricting to loopback means we
+  // don't trust the header on any request that *actually* originated from
+  // a public IP — which shouldn't happen, but belt-and-suspenders.
+  app.set("trust proxy", "loopback");
   app.use(express.json({ limit: "2mb" }));
   app.use(express.urlencoded({ extended: false }));
 
