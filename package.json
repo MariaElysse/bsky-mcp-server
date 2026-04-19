@@ -12,6 +12,8 @@
     "test:registration": "pnpm run build && node build/test/register-tools.test.js",
     "test:get-thread": "pnpm run build && node build/test/tools/test-get-post-thread.js",
     "test:url-converter": "pnpm run build && node build/test/url-converter/test-url-converter.js",
+    "start:remote": "node build/src/remote/index.js",
+    "generate-signing-key": "pnpm run build && node build/src/scripts/generate-signing-key.js",
     "process-posts": "pnpm run build && node build/src/scripts/process-post-examples.js",
     "process-threads": "pnpm run build && node build/src/scripts/process-thread-examples.js"
   },
@@ -25,12 +27,18 @@
   "packageManager": "pnpm@9.15.4+sha512.b2dc20e2fc72b3e18848459b37359a32064663e5627a51e4c74b2c29dd8e8e0491483c3abb40789cfd578bf362fb6ba8261b05f0387d76792ed6e23ea3b1b6a0",
   "dependencies": {
     "@atproto/api": "^0.14.9",
-    "@modelcontextprotocol/sdk": "^1.7.0",
+    "@atproto/oauth-client-node": "^0.3.17",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.9.0",
     "date-fns": "^4.1.0",
     "dotenv": "^16.4.7",
-    "zod": "^3.24.2"
+    "express": "^5.2.1",
+    "jose": "^6.2.2",
+    "zod": "^3.25.28"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.6",
     "@types/node": "^22.13.10",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.2"
