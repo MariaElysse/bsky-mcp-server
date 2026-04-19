@@ -315,9 +315,9 @@ export async function convertBskyUrlToAtUri(url: string, agent: Agent): Promise<
     if (!resolveResponse.success) {
       return null;
     }
-    
+
     const did = resolveResponse.data.did;
-    
+
     // Construct the AT URI
     return `at://${did}/app.bsky.feed.post/${parsed.rkey}`;
   } catch (error) {
@@ -325,3 +325,13 @@ export async function convertBskyUrlToAtUri(url: string, agent: Agent): Promise<
   }
 }
 
+/**
+ * Extract the first URL from text
+ * Returns null if no URL found
+ */
+export function extractFirstUrl(text: string): string | null {
+  // URL regex that handles common patterns
+  const urlRegex = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi;
+  const match = text.match(urlRegex);
+  return match ? match[0] : null;
+}
