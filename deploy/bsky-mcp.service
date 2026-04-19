@@ -1,0 +1,35 @@
+[Unit]
+Description=Bluesky MCP remote OAuth server
+Documentation=https://github.com/lizthegrey/bsky-mcp-server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bsky-mcp
+Group=bsky-mcp
+WorkingDirectory=/opt/bsky-mcp-server
+EnvironmentFile=/etc/bsky-mcp/env
+ExecStart=/usr/bin/node build/src/remote/index.js
+Restart=on-failure
+RestartSec=3
+
+# Hardening. Relax if you hit something legitimate.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/bsky-mcp
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

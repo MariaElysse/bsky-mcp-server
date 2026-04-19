@@ -1,0 +1,16 @@
+bsky-mcp.lizthegrey.com {
+	# TLS is assumed to be handled by Caddy's automatic HTTPS (ACME).
+	# If you use on-demand TLS or a different ACME provider, keep those
+	# directives above this snippet.
+
+	encode gzip
+
+	# Streamable HTTP + SSE need the proxy to not buffer responses and
+	# to speak HTTP/1.1 upstream. Caddy's reverse_proxy does the right
+	# thing for SSE by default, but we pin it explicitly.
+	reverse_proxy 127.0.0.1:8787 {
+		flush_interval -1
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host  {host}
+	}
+}
