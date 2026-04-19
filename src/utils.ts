@@ -1,4 +1,4 @@
-import { AtpAgent } from "@atproto/api";
+import { Agent } from "@atproto/api";
 import { RichText } from '@atproto/api'
 
 
@@ -185,7 +185,7 @@ export function formatSummaryText(postsCount: number, entityType: string = 'feed
  * @returns The feed/list information or null if invalid
  */
 export async function validateUri(
-  agent: AtpAgent, 
+  agent: Agent, 
   uri: string, 
   type: 'feed' | 'list'
 ): Promise<any | null> {
@@ -277,10 +277,10 @@ export function parseBskyUrl(url: string): { handle: string, rkey: string } | nu
 /**
  * Convert a Bluesky post URL to an AT URI
  * @param url The Bluesky web URL (e.g., https://bsky.app/profile/username.bsky.social/post/postid)
- * @param agent The AtpAgent instance to use for handle resolution
+ * @param agent The Agent instance to use for handle resolution
  * @returns The AT URI or null if conversion failed
  */
-export async function convertBskyUrlToAtUri(url: string, agent: AtpAgent): Promise<string | null> {
+export async function convertBskyUrlToAtUri(url: string, agent: Agent): Promise<string | null> {
   try {
     const parsed = parseBskyUrl(url);
     if (!parsed) return null;

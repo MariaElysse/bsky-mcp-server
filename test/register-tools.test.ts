@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { AtpAgent } from "@atproto/api";
+import { Agent } from "@atproto/api";
 import { registerTools, AgentProvider } from "../src/tools.js";
 
 const EXPECTED_TOOLS = [
@@ -68,8 +68,12 @@ async function testAgentIsResolvedPerCall() {
   // registration time. A per-session transport depends on this.
   let callCount = 0;
   const fakeAgent = {
-    session: { handle: "alice.test", did: "did:plc:alice" },
-  } as unknown as AtpAgent;
+    did: "did:plc:alice",
+    getProfile: async (_: { actor: string }) => ({
+      success: true,
+      data: { handle: "alice.test", did: "did:plc:alice" },
+    }),
+  } as unknown as Agent;
 
   const provider: AgentProvider = () => {
     callCount += 1;
@@ -108,7 +112,7 @@ async function testAgentMethodIsInvoked() {
         },
       },
     },
-  } as unknown as AtpAgent;
+  } as unknown as Agent;
 
   const { client, close } = await harness(() => fakeAgent);
   try {

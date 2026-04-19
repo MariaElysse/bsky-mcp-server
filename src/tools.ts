@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { AtpAgent } from "@atproto/api";
+import { Agent } from "@atproto/api";
 import {
   cleanHandle,
   formatSummaryText,
@@ -13,7 +13,7 @@ import {
 import { preprocessPosts, formatPostThread } from "./llm-preprocessor.js";
 import { resourcesList } from './resources.js';
 
-export type AgentProvider = () => AtpAgent | null;
+export type AgentProvider = () => Agent | null;
 
 /**
  * Register all Bluesky MCP tools on the provided server.
@@ -31,7 +31,15 @@ export function registerTools(server: McpServer, getAgent: AgentProvider): void 
       if (!agent) {
         return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
       }
-      return mcpSuccessResponse(`Your handle is: ${agent?.session?.handle}\nYour did is: ${agent?.session?.did}`);
+      if (!agent.did) {
+        return mcpErrorResponse("Not authenticated.");
+      }
+      try {
+        const profile = await agent.getProfile({ actor: agent.did });
+        return mcpSuccessResponse(`Your handle is: ${profile.data.handle}\nYour did is: ${agent.did}`);
+      } catch (error) {
+        return mcpErrorResponse(`Error fetching profile: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   );
 
@@ -447,11 +455,11 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
 
       try {
         // We can only get likes for the authenticated user
-        if (!agent.session?.handle) {
+        if (!agent.did) {
           return mcpErrorResponse("Not properly authenticated. Please check your credentials.");
         }
 
-        const authenticatedUser = agent.session.handle;
+        const authenticatedUser = agent.did;
 
         // Now fetch the authenticated user's likes with pagination
         const MAX_BATCH_SIZE = 100; // Maximum number of likes per API call
