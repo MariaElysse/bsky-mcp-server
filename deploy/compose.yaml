@@ -1,0 +1,22 @@
+services:
+  bsky-mcp:
+    container_name: bsky-mcp
+    build:
+      context: ../
+      dockerfile: Dockerfile.remote
+    image: bsky-mcp-server:local
+    # Host networking matches the PDS + Caddy containers on this host so
+    # Caddy can `reverse_proxy http://localhost:8787` without any bridge
+    # routing.
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - /etc/bsky-mcp/env
+    volumes:
+      - type: bind
+        source: /var/lib/bsky-mcp
+        target: /var/lib/bsky-mcp
+    # Watchtower auto-updates containers by tag; this image is built locally
+    # so opt out to avoid it pulling over our build.
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"

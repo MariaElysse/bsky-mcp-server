@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1.7
+FROM node:24-slim AS build
+
+# Native build deps for better-sqlite3 (node-gyp → python3 + make + g++)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN corepack enable
+
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --prod=false
+
+COPY tsconfig.json ./
+COPY src ./src
+COPY test ./test
+RUN pnpm run build
+
+# Prune dev deps before copying into the runtime image.
+RUN pnpm prune --prod
+
+# --- runtime -----------------------------------------------------------------
+
+FROM node:24-slim
+
+# Minimal runtime; no build tools.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/build ./build
+COPY --from=build /app/package.json ./package.json
+
+# The default `node` user is uid/gid 1000 on the official image. Match this
+# to the data-dir owner on the host so bind-mounted files are writable.
+USER node
+
+ENV NODE_ENV=production
+EXPOSE 8787
+
+CMD ["node", "build/src/remote/index.js"]
