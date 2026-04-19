@@ -254,9 +254,9 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
 
   server.tool(
     "search-posts",
-    "Search for posts on Bluesky",
+    "Search for posts on Bluesky. Note: Bluesky uses strict AND matching - all search terms must be present in a post for it to match. This differs from web search engines which use loose/fuzzy matching. Searching for 'a b c' requires ALL of a, b, AND c to appear in matching posts. Supported operators: from:handle, to:handle, mentions:handle, url:domain, lang:code (e.g., lang:en), has:images, has:video, has:link.",
     {
-      query: z.string().describe("Search query"),
+      query: z.string().describe("Search query. Uses strict AND matching - all terms must match. Supported operators: from:, to:, mentions:, url:, lang:, has:images, has:video, has:link"),
       limit: z.number().min(1).max(100).default(50).describe("Number of results to fetch (1-100)"),
       sort: z.enum(["top", "latest"]).default("top").describe("Sort order for search results - 'top' for most relevant or 'latest' for most recent"),
     },
