@@ -8,6 +8,7 @@ import { registerTools, AgentProvider } from "../src/tools.js";
 const EXPECTED_TOOLS = [
   "get-my-handle-and-did",
   "get-timeline-posts",
+  "get-notifications",
   "create-post",
   "get-profile",
   "search-posts",
@@ -45,7 +46,7 @@ async function testExpectedToolSet() {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name).sort();
     assert.deepEqual(names, [...EXPECTED_TOOLS].sort(),
-      `registered tool set drifted from the 21 expected names`);
+      `registered tool set drifted from the 22 expected names`);
   } finally {
     await close();
   }
@@ -178,7 +179,7 @@ async function testRefusalCanaryIsRedacted() {
 
 async function main() {
   const cases: Array<[string, () => Promise<void>]> = [
-    ["registers exactly the expected 21 tools", testExpectedToolSet],
+    ["registers exactly the expected 22 tools", testExpectedToolSet],
     ["tools error out when getAgent returns null", testNullAgentReturnsError],
     ["getAgent is resolved per tool call, not cached", testAgentIsResolvedPerCall],
     ["tool handlers invoke methods on the resolved agent", testAgentMethodIsInvoked],
