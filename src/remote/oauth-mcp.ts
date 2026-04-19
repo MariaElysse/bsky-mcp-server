@@ -3,6 +3,12 @@ import type { Request, Response } from "express";
 import type { NodeOAuthClient } from "@atproto/oauth-client-node";
 import type { AuthorizationParams, OAuthServerProvider } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
+import {
+  InvalidClientError,
+  InvalidGrantError,
+  InvalidRequestError,
+  InvalidTokenError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type {
   OAuthClientInformationFull,
   OAuthTokenRevocationRequest,
@@ -16,6 +22,10 @@ import { BLUESKY_SCOPES } from "./oauth-bluesky.js";
 export interface ProviderConfig {
   /** Lifetime of MCP access tokens in seconds. */
   accessTokenTtlSec: number;
+  /** Lifetime of MCP refresh tokens in seconds. Must be longer than
+   *  accessTokenTtlSec — otherwise clients can never refresh a stale
+   *  access token because the matching refresh token has died too. */
+  refreshTokenTtlSec: number;
   /** Lifetime of MCP authorization codes in seconds. */
   authCodeTtlSec: number;
   /** Lifetime of a pending authorization (login page timeout). */
@@ -23,9 +33,11 @@ export interface ProviderConfig {
 }
 
 export const DEFAULT_PROVIDER_CONFIG: ProviderConfig = {
-  accessTokenTtlSec: 60 * 60,      // 1h
-  authCodeTtlSec: 60,              // 60s — code must be exchanged quickly
-  pendingAuthTtlSec: 15 * 60,      // 15m — user has 15min to complete login
+  accessTokenTtlSec: 60 * 60,             // 1h
+  refreshTokenTtlSec: 30 * 24 * 60 * 60,  // 30 days — long enough that an
+                                          // idle connector can still refresh.
+  authCodeTtlSec: 60,                     // 60s — code must be exchanged quickly
+  pendingAuthTtlSec: 15 * 60,             // 15m — user has 15min to complete login
 };
 
 /**
@@ -75,7 +87,7 @@ export class BlueskyFederatedProvider implements OAuthServerProvider {
   ): Promise<string> {
     const row = this.storage.getAuthCode(authorizationCode);
     if (!row) {
-      throw new Error("Invalid or expired authorization code");
+      throw new InvalidGrantError("Invalid or expired authorization code");
     }
     return row.code_challenge;
   }
@@ -89,13 +101,13 @@ export class BlueskyFederatedProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     const row = this.storage.consumeAuthCode(authorizationCode);
     if (!row) {
-      throw new Error("Invalid or expired authorization code");
+      throw new InvalidGrantError("Invalid or expired authorization code");
     }
     if (row.client_id !== client.client_id) {
-      throw new Error("Authorization code was issued to a different client");
+      throw new InvalidClientError("Authorization code was issued to a different client");
     }
     if (redirectUri && redirectUri !== row.redirect_uri) {
-      throw new Error("redirect_uri does not match the one used during authorization");
+      throw new InvalidRequestError("redirect_uri does not match the one used during authorization");
     }
     return this.issueTokens(client.client_id, row.did, row.scopes, row.resource);
   }
@@ -108,10 +120,10 @@ export class BlueskyFederatedProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     const existing = this.storage.getTokenByRefresh(refreshToken);
     if (!existing) {
-      throw new Error("Invalid refresh token");
+      throw new InvalidGrantError("Invalid or expired refresh token");
     }
     if (existing.client_id !== client.client_id) {
-      throw new Error("Refresh token was issued to a different client");
+      throw new InvalidClientError("Refresh token was issued to a different client");
     }
     // Rotate: discard the old pair so an intercepted refresh token can't be
     // replayed after we've already used it.
@@ -122,7 +134,7 @@ export class BlueskyFederatedProvider implements OAuthServerProvider {
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const row = this.storage.getTokenByAccess(token);
     if (!row) {
-      throw new Error("Invalid or expired access token");
+      throw new InvalidTokenError("Invalid or expired access token");
     }
     return {
       token,
@@ -149,6 +161,7 @@ export class BlueskyFederatedProvider implements OAuthServerProvider {
   ): OAuthTokens {
     const access = randomBytes(32).toString("base64url");
     const refresh = randomBytes(32).toString("base64url");
+    const now = Date.now();
     this.storage.putToken({
       access_token: access,
       refresh_token: refresh,
@@ -156,7 +169,8 @@ export class BlueskyFederatedProvider implements OAuthServerProvider {
       did,
       scopes,
       resource,
-      expires_at: Date.now() + this.config.accessTokenTtlSec * 1000,
+      expires_at: now + this.config.accessTokenTtlSec * 1000,
+      refresh_expires_at: now + this.config.refreshTokenTtlSec * 1000,
     });
     return {
       access_token: access,
