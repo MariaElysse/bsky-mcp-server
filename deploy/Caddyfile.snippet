@@ -1,9 +1,11 @@
 # Append to your existing Caddyfile (keep the global options block at the top).
-# This matches the style of the adjacent PDS block on lizthegrey.com's deployment.
+#
+# NOTE on TLS: the PDS host's Caddyfile typically sets a global
+# `on_demand_tls { ask http://localhost:3000/tls-check }` for wildcard PDS
+# subdomains. That ask endpoint only whitelists *.pds.<domain>, so for a
+# fixed extra hostname like this we do NOT use on_demand — we let Caddy
+# issue a regular ACME cert at startup instead.
 bsky-mcp.lizthegrey.com {
-	tls {
-		on_demand
-	}
 	encode gzip
 	# Streamable HTTP responses mustn't be buffered.
 	reverse_proxy http://localhost:8787 {
