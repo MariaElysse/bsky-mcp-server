@@ -46,7 +46,10 @@ export interface McpAuthCode {
 }
 
 /**
- * An MCP access/refresh token pair, bound to a Bluesky DID.
+ * An MCP access/refresh token pair, bound to a Bluesky DID. Access and
+ * refresh halves have independent expiries — if they shared one, Claude's
+ * connector would never be able to refresh a stale access token, because
+ * the matching refresh token would have died at the same moment.
  */
 export interface McpToken {
   access_token: string;
@@ -55,7 +58,11 @@ export interface McpToken {
   did: string;
   scopes: string | null;
   resource: string | null;
+  /** Access-token expiry (seconds-since-epoch × 1000). */
   expires_at: number;
+  /** Refresh-token expiry (seconds-since-epoch × 1000). Much longer than
+   *  `expires_at` — this is what clients rely on to survive idle periods. */
+  refresh_expires_at: number;
 }
 
 const SCHEMA = `
@@ -102,13 +109,14 @@ CREATE TABLE IF NOT EXISTS mcp_auth_codes (
 );
 
 CREATE TABLE IF NOT EXISTS mcp_tokens (
-  access_token  TEXT PRIMARY KEY,
-  refresh_token TEXT UNIQUE,
-  client_id     TEXT NOT NULL,
-  did           TEXT NOT NULL,
-  scopes        TEXT,
-  resource      TEXT,
-  expires_at    INTEGER NOT NULL
+  access_token       TEXT PRIMARY KEY,
+  refresh_token      TEXT UNIQUE,
+  client_id          TEXT NOT NULL,
+  did                TEXT NOT NULL,
+  scopes             TEXT,
+  resource           TEXT,
+  expires_at         INTEGER NOT NULL,
+  refresh_expires_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_mcp_tokens_refresh ON mcp_tokens(refresh_token);
@@ -123,6 +131,26 @@ export class Storage {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /**
+   * Idempotent, crash-safe schema migrations for data inherited from older
+   * deployments. Each step catches "duplicate column" etc. so re-running on
+   * an already-migrated DB is a no-op.
+   */
+  private migrate(): void {
+    try {
+      this.db.exec(`ALTER TABLE mcp_tokens ADD COLUMN refresh_expires_at INTEGER NOT NULL DEFAULT 0`);
+    } catch {
+      // Column already exists.
+    }
+    // Existing rows from before this column existed used `expires_at` as a
+    // shared deadline for both halves. Preserve that behavior for pre-existing
+    // tokens so we don't retroactively extend their lifetime.
+    this.db.prepare(
+      `UPDATE mcp_tokens SET refresh_expires_at = expires_at WHERE refresh_expires_at = 0`
+    ).run();
   }
 
   close(): void {
@@ -137,10 +165,16 @@ export class Storage {
     const stmts = [
       this.db.prepare(`DELETE FROM mcp_pending_authorizations WHERE expires_at < ?`),
       this.db.prepare(`DELETE FROM mcp_auth_codes WHERE expires_at < ?`),
-      this.db.prepare(`DELETE FROM mcp_tokens WHERE expires_at < ?`),
+      // Only drop token rows once BOTH the access and refresh halves are
+      // dead — otherwise we'd delete valid refresh tokens whose access
+      // halves have naturally rotated out.
+      this.db.prepare(`DELETE FROM mcp_tokens WHERE refresh_expires_at < ? AND expires_at < ?`),
     ];
+    const tokenStmt = stmts[2];
+    const auxStmts = stmts.slice(0, 2);
     const tx = this.db.transaction((cutoff: number) => {
-      for (const stmt of stmts) stmt.run(cutoff);
+      for (const s of auxStmts) s.run(cutoff);
+      tokenStmt.run(cutoff, cutoff);
     });
     tx(now);
   }
@@ -305,8 +339,8 @@ export class Storage {
   putToken(token: McpToken): void {
     this.db.prepare(
       `INSERT INTO mcp_tokens
-       (access_token, refresh_token, client_id, did, scopes, resource, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+       (access_token, refresh_token, client_id, did, scopes, resource, expires_at, refresh_expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       token.access_token,
       token.refresh_token,
@@ -315,6 +349,7 @@ export class Storage {
       token.scopes,
       token.resource,
       token.expires_at,
+      token.refresh_expires_at,
     );
   }
 
@@ -328,9 +363,12 @@ export class Storage {
   }
 
   getTokenByRefresh(refreshToken: string): McpToken | undefined {
-    return this.db.prepare(`SELECT * FROM mcp_tokens WHERE refresh_token = ?`).get(refreshToken) as
+    const row = this.db.prepare(`SELECT * FROM mcp_tokens WHERE refresh_token = ?`).get(refreshToken) as
       | McpToken
       | undefined;
+    if (!row) return undefined;
+    if (row.refresh_expires_at < Date.now()) return undefined;
+    return row;
   }
 
   revokeToken(accessOrRefresh: string): void {
