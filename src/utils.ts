@@ -70,7 +70,33 @@ export interface McpErrorResponse {
   [key: string]: unknown;
 }
 
+export function mcpLog(message: string): void {
+  if (process.env.LOG_RESPONSES === 'true') {
+    // See https://modelcontextprotocol.io/docs/tools/debugging - we should use the server.sendLoggingMessage method, but it is not working for some reason
+    console.error(message);
+  }
+}
 
+export function mcpErrorResponse(message: string): McpErrorResponse {
+  mcpLog(message);
+  return {
+    isError: true,
+    content: [{
+      type: "text",
+      text: message
+    }]
+  };
+}
+
+export function mcpSuccessResponse(text: string): McpSuccessResponse {
+  mcpLog(text);
+  return {
+    content: [{
+      type: "text",
+      text
+    }]
+  };
+}
 
 
 /**
