@@ -256,10 +256,20 @@ export function callbackHandler(bsky: NodeOAuthClient, storage: Storage, config:
         expires_at: Date.now() + config.authCodeTtlSec * 1000,
       });
 
-      const redirect = new URL(pending.mcp_redirect_uri);
-      redirect.searchParams.set("code", code);
-      if (pending.mcp_state) redirect.searchParams.set("state", pending.mcp_state);
-      res.redirect(redirect.toString());
+      // Encode query params via encodeURIComponent rather than
+      // URLSearchParams. URLSearchParams follows the HTML form-encoding rule
+      // that turns spaces into `+`, which is fine per RFC 6749 but trips up
+      // OAuth clients whose state/PKCE values contain characters they
+      // themselves mis-encoded on the way in (e.g. one that URL-encoded the
+      // base64 `+` as `%20` rather than `%2B`). encodeURIComponent emits
+      // `%20` for space and round-trips symmetrically for every byte, so
+      // whatever bytes they sent land back in their callback unchanged.
+      const parts = [`code=${encodeURIComponent(code)}`];
+      if (pending.mcp_state) {
+        parts.push(`state=${encodeURIComponent(pending.mcp_state)}`);
+      }
+      const sep = pending.mcp_redirect_uri.includes("?") ? "&" : "?";
+      res.redirect(pending.mcp_redirect_uri + sep + parts.join("&"));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).type("html").send(renderErrorPage("Bluesky sign-in failed", message));
