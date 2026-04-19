@@ -158,23 +158,25 @@ export class Storage {
   }
 
   /**
-   * Delete expired rows from every table that carries an expires_at column.
-   * Cheap; safe to call at startup and periodically from a timer.
+   * Delete expired / abandoned rows. Cheap; safe to call at startup and
+   * periodically from a timer.
    */
   gc(now: number = Date.now()): void {
-    const stmts = [
-      this.db.prepare(`DELETE FROM mcp_pending_authorizations WHERE expires_at < ?`),
-      this.db.prepare(`DELETE FROM mcp_auth_codes WHERE expires_at < ?`),
-      // Only drop token rows once BOTH the access and refresh halves are
-      // dead — otherwise we'd delete valid refresh tokens whose access
-      // halves have naturally rotated out.
-      this.db.prepare(`DELETE FROM mcp_tokens WHERE refresh_expires_at < ? AND expires_at < ?`),
-    ];
-    const tokenStmt = stmts[2];
-    const auxStmts = stmts.slice(0, 2);
+    // ATProto OAuth state rows are written by NodeOAuthClient at the start
+    // of a flow and deleted at the callback. If the user never returns
+    // from the PDS (closed the tab, PDS was down, client crashed, ...) the
+    // row leaks. Time it out after 30 minutes — well past any realistic
+    // sign-in flow; longer than our own pending-auth TTL (15m) so that a
+    // running flow isn't sabotaged by a racing gc sweep.
+    const ATPROTO_STATE_TTL_MS = 30 * 60 * 1000;
+
     const tx = this.db.transaction((cutoff: number) => {
-      for (const s of auxStmts) s.run(cutoff);
-      tokenStmt.run(cutoff, cutoff);
+      this.db.prepare(`DELETE FROM mcp_pending_authorizations WHERE expires_at < ?`).run(cutoff);
+      this.db.prepare(`DELETE FROM mcp_auth_codes WHERE expires_at < ?`).run(cutoff);
+      // Only drop token rows once BOTH halves are dead — otherwise we'd
+      // delete valid refresh tokens whose access halves rotated out.
+      this.db.prepare(`DELETE FROM mcp_tokens WHERE refresh_expires_at < ? AND expires_at < ?`).run(cutoff, cutoff);
+      this.db.prepare(`DELETE FROM atproto_oauth_state WHERE created_at < ?`).run(cutoff - ATPROTO_STATE_TTL_MS);
     });
     tx(now);
   }
