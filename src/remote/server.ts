@@ -61,6 +61,26 @@ export function buildApp(config: ServerConfig): Express {
   app.post("/oauth/login", loginHandler(config.bskyClient, config.storage));
   app.get("/oauth/callback", callbackHandler(config.bskyClient, config.storage, providerConfig));
 
+  // Landing page at GET / — Claude's OAuth discovery will find the well-known
+  // endpoints at the root, so if someone types the bare origin as their MCP
+  // server URL, auth succeeds but the subsequent POST / hits Express's 404
+  // and surfaces as "account was authorized but no MCP server was found."
+  // A friendly page that names the real endpoint saves that round trip.
+  const mcpPath = `${config.publicUrl.replace(/\/$/, "")}/mcp`;
+  const mcpPathEsc = mcpPath.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+  app.get("/", (_req, res) => {
+    res.type("html").send(`<!doctype html>
+<html><head><meta charset="utf-8"><title>Bluesky MCP Server</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;line-height:1.5}code{background:#f4f4f4;padding:.15rem .35rem;border-radius:4px}</style>
+</head><body>
+<h1>Bluesky MCP Server</h1>
+<p>This host speaks the <a href="https://modelcontextprotocol.io">Model Context Protocol</a> over HTTP with ATProto OAuth.</p>
+<p>The MCP endpoint is <code>${mcpPathEsc}</code> — add <strong>that</strong> URL to your MCP client, not the bare origin.</p>
+<p>Source: <a href="https://github.com/lizthegrey/bsky-mcp-server">github.com/lizthegrey/bsky-mcp-server</a></p>
+</body></html>`);
+  });
+
   // MCP SDK auth router. Installs:
   //   GET  /.well-known/oauth-authorization-server
   //   GET  /.well-known/oauth-protected-resource
