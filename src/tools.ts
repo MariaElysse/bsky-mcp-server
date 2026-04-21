@@ -1112,9 +1112,9 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
     "Get one page of users that a person follows. For the authenticated user's own follows, reads records directly from their PDS (fast, no AppView dependency); otherwise uses the AppView graph.getFollows endpoint. Returns a cursor that should be passed back in to fetch the next page.",
     {
       user: z.string().describe("The handle or DID of the user (e.g., alice.bsky.social)"),
-      limit: z.number().min(1).max(100).default(100).describe("Maximum follows per page (1-100). Call repeatedly with the returned cursor to page further."),
+      limit: z.number().min(1).max(500).default(100).describe("Maximum follows to return in this response (1-500). The tool loops the underlying PDS/AppView pagination (100/page) internally to fulfill larger requests. Raise this when you intend to dump the result to a file; keep it small when the output is meant to stay in the model's context."),
       cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call."),
-      detail: z.enum(["compact", "full"]).default("compact").describe("Output verbosity. 'compact' (default) returns one line per follow with handle, display name, and DID — fits the full page in ~8KB. 'full' additionally includes bio and counts; at limit=100 the payload can exceed what some Claude clients will render."),
+      detail: z.enum(["compact", "full"]).default("compact").describe("Output verbosity. 'compact' (default) returns one line per follow with handle, display name, and DID — ~80 bytes per entry. 'full' additionally includes bio and counts; note that at large limits the payload can exceed what some Claude clients will render."),
     },
     async ({ user, limit, cursor, detail }) => {
       const agent = getAgent();
@@ -1130,57 +1130,77 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
         const targetDid = profileResponse.data.did;
         const isSelf = agent.did === targetDid;
 
-        let followDids: string[] = [];
-        let nextCursor: string | undefined;
+        const PAGE_SIZE = 100; // Both listRecords and graph.getFollows cap a single call at 100.
+        const followDids: string[] = [];
+        let nextCursor: string | undefined = cursor;
 
-        if (isSelf) {
-          // Fast path: read the user's own app.bsky.graph.follow records
-          // straight out of their PDS. No AppView hop, no aggregation lag,
-          // no 30-second timeouts under graph load.
-          const res = await agent.com.atproto.repo.listRecords({
-            repo: targetDid,
-            collection: 'app.bsky.graph.follow',
-            limit,
-            cursor,
-          });
-          if (!res.success) {
-            return mcpErrorResponse(`Failed to list follow records for ${user}.`);
+        while (followDids.length < limit) {
+          const batchLimit = Math.min(PAGE_SIZE, limit - followDids.length);
+          if (isSelf) {
+            // Fast path: read app.bsky.graph.follow records directly from the
+            // user's PDS. No AppView hop, no aggregation lag, no 30-second
+            // timeouts under graph load.
+            const res = await agent.com.atproto.repo.listRecords({
+              repo: targetDid,
+              collection: 'app.bsky.graph.follow',
+              limit: batchLimit,
+              cursor: nextCursor,
+            });
+            if (!res.success) {
+              if (followDids.length === 0) {
+                return mcpErrorResponse(`Failed to list follow records for ${user}.`);
+              }
+              break;
+            }
+            for (const r of res.data.records) {
+              const subject = (r.value as { subject?: unknown })?.subject;
+              if (typeof subject === 'string') followDids.push(subject);
+            }
+            nextCursor = res.data.cursor;
+          } else {
+            // Fall back to AppView for other users' graphs — we don't host
+            // their records, so the PDS shortcut isn't available.
+            const res = await agent.app.bsky.graph.getFollows({
+              actor: targetDid,
+              limit: batchLimit,
+              cursor: nextCursor,
+            });
+            if (!res.success) {
+              if (followDids.length === 0) {
+                return mcpErrorResponse(`Failed to fetch follows for ${user}.`);
+              }
+              break;
+            }
+            for (const f of res.data.follows) followDids.push(f.did);
+            nextCursor = res.data.cursor;
           }
-          followDids = res.data.records
-            .map(r => (r.value as { subject?: unknown })?.subject)
-            .filter((s): s is string => typeof s === 'string');
-          nextCursor = res.data.cursor;
-        } else {
-          // Fall back to AppView for other users' graphs — we don't host
-          // their records, so the PDS shortcut isn't available.
-          const res = await agent.app.bsky.graph.getFollows({
-            actor: targetDid,
-            limit,
-            cursor,
-          });
-          if (!res.success) {
-            return mcpErrorResponse(`Failed to fetch follows for ${user}.`);
-          }
-          followDids = res.data.follows.map(f => f.did);
-          nextCursor = res.data.cursor;
+          if (!nextCursor) break;
         }
 
         if (followDids.length === 0) {
           return mcpSuccessResponse(`@${user} doesn't follow anyone.`);
         }
 
-        // Hydrate to profiles via AppView (25 per batch is the endpoint cap).
+        // Hydrate to profiles via AppView. The endpoint caps at 25 actors per
+        // call, so split the DID list into chunks — but fire the chunks in
+        // parallel so hydration cost grows with page count, not with the
+        // total number of DIDs.
+        const CHUNK = 25;
+        const chunks: string[][] = [];
+        for (let i = 0; i < followDids.length; i += CHUNK) {
+          chunks.push(followDids.slice(i, i + CHUNK));
+        }
         const profileByDid = new Map<string, any>();
-        for (let i = 0; i < followDids.length; i += 25) {
-          const chunk = followDids.slice(i, i + 25);
+        const chunkResults = await Promise.all(chunks.map(async (chunk) => {
           try {
             const res = await agent.app.bsky.actor.getProfiles({ actors: chunk });
-            if (res.success) {
-              for (const p of res.data.profiles) profileByDid.set(p.did, p);
-            }
+            return res.success ? res.data.profiles : [];
           } catch {
-            // Soldier on: any unresolved DIDs render as DID-only.
+            return []; // Any unresolved DIDs render as DID-only.
           }
+        }));
+        for (const profiles of chunkResults) {
+          for (const p of profiles) profileByDid.set(p.did, p);
         }
 
         const formattedFollows = followDids.map((did, index) => {
