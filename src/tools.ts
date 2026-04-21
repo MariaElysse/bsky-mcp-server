@@ -1109,96 +1109,97 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
   server.tool(
     "get-follows",
-    "Get a list of users that a person follows",
+    "Get one page of users that a person follows. For the authenticated user's own follows, reads records directly from their PDS (fast, no AppView dependency); otherwise uses the AppView graph.getFollows endpoint. Returns a cursor that should be passed back in to fetch the next page.",
     {
       user: z.string().describe("The handle or DID of the user (e.g., alice.bsky.social)"),
-      limit: z.number().min(1).max(500).default(500).describe("Maximum number of follows to fetch (1-500)"),
+      limit: z.number().min(1).max(100).default(100).describe("Maximum follows per page (1-100). Call repeatedly with the returned cursor to page further."),
+      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call."),
     },
-    async ({ user, limit }) => {
+    async ({ user, limit, cursor }) => {
       const agent = getAgent();
       if (!agent) {
         return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
       }
 
       try {
-        // First, verify the user exists by trying to get their profile
-        try {
-          const profileResponse = await agent.getProfile({ actor: cleanHandle(user) });
-          if (!profileResponse.success) {
-            return mcpErrorResponse(`User not found: ${user}`);
-          }
-
-          // Use the display name in the summary if available
-          const displayName = profileResponse.data.displayName || user;
-
-          // Now fetch who this user follows with pagination
-          const MAX_BATCH_SIZE = 100; // Maximum number of follows per API call
-          const MAX_BATCHES = 5;      // Maximum number of API calls to make (100 x 5 = 500)
-          let allFollows: any[] = [];
-          let nextCursor: string | undefined = undefined;
-          let batchCount = 0;
-
-          // Loop to fetch follows with pagination
-          while (batchCount < MAX_BATCHES && allFollows.length < limit) {
-            // Calculate how many follows to fetch in this batch
-            const batchLimit = Math.min(MAX_BATCH_SIZE, limit - allFollows.length);
-
-            // Make the API call with cursor if we have one
-            const response = await agent.app.bsky.graph.getFollows({
-              actor: cleanHandle(user),
-              limit: batchLimit,
-              cursor: nextCursor
-            });
-
-            if (!response.success) {
-              // If we've already fetched some follows, return those
-              if (allFollows.length > 0) {
-                break;
-              }
-              return mcpErrorResponse(`Failed to fetch follows for ${user}.`);
-            }
-
-            const { follows, cursor } = response.data;
-
-            // Add the fetched follows to our collection
-            allFollows = allFollows.concat(follows);
-
-            // Update cursor for the next batch
-            nextCursor = cursor;
-            batchCount++;
-
-            // If no cursor returned or we've reached our limit, stop paginating
-            if (!cursor || allFollows.length >= limit) {
-              break;
-            }
-          }
-
-          if (allFollows.length === 0) {
-            return mcpSuccessResponse(`@${user} doesn't follow anyone.`);
-          }
-
-          // Format the follows list
-          const formattedFollows = allFollows.map((follow: any, index: number) => {
-            return `User #${index + 1}:
-Display Name: ${follow.displayName || 'No display name'}
-Handle: @${follow.handle}
-DID: ${follow.did}
-${follow.description ? `Bio: ${follow.description}` : 'Bio: No bio provided'}
-${follow.followersCount !== undefined ? `Followers: ${follow.followersCount}` : ''}
-${follow.followsCount !== undefined ? `Following: ${follow.followsCount}` : ''}
-${follow.postsCount !== undefined ? `Posts: ${follow.postsCount}` : ''}
-${follow.indexedAt ? `Following since: ${new Date(follow.indexedAt).toLocaleString()}` : ''}
----`;
-          }).join("\n\n");
-
-          // Create a summary
-          const summaryText = `Retrieved ${allFollows.length} users that @${user} follows.${nextCursor ? ' More results are available.' : ''}`;
-
-          return mcpSuccessResponse(`${summaryText}\n\n${formattedFollows}`);
-
-        } catch (profileError) {
-          return mcpErrorResponse(`Error retrieving user profile: ${profileError instanceof Error ? profileError.message : String(profileError)}`);
+        const profileResponse = await agent.getProfile({ actor: cleanHandle(user) });
+        if (!profileResponse.success) {
+          return mcpErrorResponse(`User not found: ${user}`);
         }
+        const targetDid = profileResponse.data.did;
+        const isSelf = agent.did === targetDid;
+
+        let followDids: string[] = [];
+        let nextCursor: string | undefined;
+
+        if (isSelf) {
+          // Fast path: read the user's own app.bsky.graph.follow records
+          // straight out of their PDS. No AppView hop, no aggregation lag,
+          // no 30-second timeouts under graph load.
+          const res = await agent.com.atproto.repo.listRecords({
+            repo: targetDid,
+            collection: 'app.bsky.graph.follow',
+            limit,
+            cursor,
+          });
+          if (!res.success) {
+            return mcpErrorResponse(`Failed to list follow records for ${user}.`);
+          }
+          followDids = res.data.records
+            .map(r => (r.value as { subject?: unknown })?.subject)
+            .filter((s): s is string => typeof s === 'string');
+          nextCursor = res.data.cursor;
+        } else {
+          // Fall back to AppView for other users' graphs — we don't host
+          // their records, so the PDS shortcut isn't available.
+          const res = await agent.app.bsky.graph.getFollows({
+            actor: targetDid,
+            limit,
+            cursor,
+          });
+          if (!res.success) {
+            return mcpErrorResponse(`Failed to fetch follows for ${user}.`);
+          }
+          followDids = res.data.follows.map(f => f.did);
+          nextCursor = res.data.cursor;
+        }
+
+        if (followDids.length === 0) {
+          return mcpSuccessResponse(`@${user} doesn't follow anyone.`);
+        }
+
+        // Hydrate to profiles via AppView (25 per batch is the endpoint cap).
+        const profileByDid = new Map<string, any>();
+        for (let i = 0; i < followDids.length; i += 25) {
+          const chunk = followDids.slice(i, i + 25);
+          try {
+            const res = await agent.app.bsky.actor.getProfiles({ actors: chunk });
+            if (res.success) {
+              for (const p of res.data.profiles) profileByDid.set(p.did, p);
+            }
+          } catch {
+            // Soldier on: any unresolved DIDs render as DID-only.
+          }
+        }
+
+        const formattedFollows = followDids.map((did, index) => {
+          const p = profileByDid.get(did);
+          return `User #${index + 1}:
+Display Name: ${p?.displayName || 'No display name'}
+Handle: ${p?.handle ? `@${p.handle}` : '(handle unresolved)'}
+DID: ${did}
+${p?.description ? `Bio: ${p.description}` : 'Bio: No bio provided'}
+${p?.followersCount !== undefined ? `Followers: ${p.followersCount}` : ''}
+${p?.followsCount !== undefined ? `Following: ${p.followsCount}` : ''}
+${p?.postsCount !== undefined ? `Posts: ${p.postsCount}` : ''}
+${p?.indexedAt ? `Indexed at: ${new Date(p.indexedAt).toLocaleString()}` : ''}
+---`;
+        }).join("\n\n");
+
+        const source = isSelf ? "PDS-direct" : "AppView";
+        const summaryText = `Retrieved ${followDids.length} users that @${user} follows (via ${source})${nextCursor ? `. More pages available — pass cursor="${nextCursor}" to continue.` : "."}`;
+
+        return mcpSuccessResponse(`${summaryText}\n\n${formattedFollows}`);
       } catch (error) {
         return mcpErrorResponse(`Error fetching follows: ${error instanceof Error ? error.message : String(error)}`);
       }
