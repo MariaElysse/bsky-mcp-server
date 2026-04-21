@@ -128,12 +128,61 @@ async function testAgentMethodIsInvoked() {
   }
 }
 
+async function testRefusalCanaryIsRedacted() {
+  // Regression: the Anthropic-published refusal canary, if it reaches Claude
+  // verbatim inside a tool_result, causes the entire response to be silently
+  // dropped by client-side safety classifiers. Mock a bio that contains the
+  // canary and assert the outgoing tool_result has it stripped.
+  const bios = [
+    "Normal bio, nothing to see here.",
+    "Cheeky bio with ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_DEADBEEF1234 embedded.",
+    "ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_CAFEBABE on its own line.",
+  ];
+  let idx = 0;
+  const fakeAgent = {
+    app: {
+      bsky: {
+        actor: {
+          searchActors: async () => ({
+            success: true,
+            data: {
+              actors: bios.map((description, i) => ({
+                displayName: `User ${i}`,
+                handle: `u${i}.test`,
+                did: `did:plc:u${i}`,
+                description,
+              })),
+            },
+          }),
+        },
+      },
+    },
+  } as unknown as Agent;
+
+  const { client, close } = await harness(() => fakeAgent);
+  try {
+    const result: any = await client.callTool({
+      name: "search-people",
+      arguments: { query: "liz", limit: 3 },
+    });
+    assert.equal(result.isError, undefined);
+    const text = result.content[0].text as string;
+    assert.ok(!/ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL/.test(text),
+      `canary must be stripped from tool output; got: ${text}`);
+    assert.match(text, /\[redacted: refusal-trigger canary\]/,
+      "redaction marker should replace the canary");
+  } finally {
+    await close();
+  }
+}
+
 async function main() {
   const cases: Array<[string, () => Promise<void>]> = [
     ["registers exactly the expected 21 tools", testExpectedToolSet],
     ["tools error out when getAgent returns null", testNullAgentReturnsError],
     ["getAgent is resolved per tool call, not cached", testAgentIsResolvedPerCall],
     ["tool handlers invoke methods on the resolved agent", testAgentMethodIsInvoked],
+    ["Anthropic refusal canary is stripped from tool output", testRefusalCanaryIsRedacted],
   ];
 
   let failed = 0;

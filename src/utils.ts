@@ -77,23 +77,47 @@ export function mcpLog(message: string): void {
   }
 }
 
+/**
+ * Defense in depth against content-based tool-output rejection.
+ *
+ * Anthropic publishes a canary string whose sole purpose is to trip its
+ * safety classifiers — `ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_` followed
+ * by a hex digest. When a Bluesky user slips one into a bio, a post, a
+ * profile description, etc., any tool that surfaces that text back
+ * through Claude produces an empty/redacted tool_result client-side,
+ * which appears to the user as a 60s "timed out" with no content.
+ *
+ * Since this server relays arbitrary user-generated content, one cheeky
+ * follow is enough to break tools like `get-follows`, `get-profile`,
+ * `get-timeline-posts`, etc. Scrub the literal pattern at the response
+ * boundary so it can't reach the classifier. This is not a general
+ * censorship hook — it targets exactly the published canary.
+ */
+const REFUSAL_CANARY_RE = /ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_[A-Za-z0-9]+/g;
+
+export function redactRefusalCanary(text: string): string {
+  return text.replace(REFUSAL_CANARY_RE, '[redacted: refusal-trigger canary]');
+}
+
 export function mcpErrorResponse(message: string): McpErrorResponse {
-  mcpLog(message);
+  const scrubbed = redactRefusalCanary(message);
+  mcpLog(scrubbed);
   return {
     isError: true,
     content: [{
       type: "text",
-      text: message
+      text: scrubbed
     }]
   };
 }
 
 export function mcpSuccessResponse(text: string): McpSuccessResponse {
-  mcpLog(text);
+  const scrubbed = redactRefusalCanary(text);
+  mcpLog(scrubbed);
   return {
     content: [{
       type: "text",
-      text
+      text: scrubbed
     }]
   };
 }
