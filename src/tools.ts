@@ -1114,8 +1114,9 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
       user: z.string().describe("The handle or DID of the user (e.g., alice.bsky.social)"),
       limit: z.number().min(1).max(100).default(100).describe("Maximum follows per page (1-100). Call repeatedly with the returned cursor to page further."),
       cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call."),
+      detail: z.enum(["compact", "full"]).default("compact").describe("Output verbosity. 'compact' (default) returns one line per follow with handle, display name, and DID — fits the full page in ~8KB. 'full' additionally includes bio and counts; at limit=100 the payload can exceed what some Claude clients will render."),
     },
-    async ({ user, limit, cursor }) => {
+    async ({ user, limit, cursor, detail }) => {
       const agent = getAgent();
       if (!agent) {
         return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
@@ -1184,9 +1185,14 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
         const formattedFollows = followDids.map((did, index) => {
           const p = profileByDid.get(did);
+          const handle = p?.handle ? `@${p.handle}` : '(handle unresolved)';
+          if (detail === "compact") {
+            const name = p?.displayName ? ` (${p.displayName})` : "";
+            return `${index + 1}. ${handle}${name} — ${did}`;
+          }
           return `User #${index + 1}:
 Display Name: ${p?.displayName || 'No display name'}
-Handle: ${p?.handle ? `@${p.handle}` : '(handle unresolved)'}
+Handle: ${handle}
 DID: ${did}
 ${p?.description ? `Bio: ${p.description}` : 'Bio: No bio provided'}
 ${p?.followersCount !== undefined ? `Followers: ${p.followersCount}` : ''}
@@ -1194,7 +1200,7 @@ ${p?.followsCount !== undefined ? `Following: ${p.followsCount}` : ''}
 ${p?.postsCount !== undefined ? `Posts: ${p.postsCount}` : ''}
 ${p?.indexedAt ? `Indexed at: ${new Date(p.indexedAt).toLocaleString()}` : ''}
 ---`;
-        }).join("\n\n");
+        }).join(detail === "compact" ? "\n" : "\n\n");
 
         const source = isSelf ? "PDS-direct" : "AppView";
         const summaryText = `Retrieved ${followDids.length} users that @${user} follows (via ${source})${nextCursor ? `. More pages available — pass cursor="${nextCursor}" to continue.` : "."}`;
