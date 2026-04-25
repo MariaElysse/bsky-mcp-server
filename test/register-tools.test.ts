@@ -19,6 +19,7 @@ const EXPECTED_TOOLS = [
   "get-trends",
   "like-post",
   "follow-user",
+  "unfollow-user",
   "get-pinned-feeds",
   "get-feed-posts",
   "get-list-posts",
@@ -45,7 +46,7 @@ async function testExpectedToolSet() {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name).sort();
     assert.deepEqual(names, [...EXPECTED_TOOLS].sort(),
-      `registered tool set drifted from the 21 expected names`);
+      `registered tool set drifted from the 22 expected names`);
   } finally {
     await close();
   }
@@ -128,12 +129,116 @@ async function testAgentMethodIsInvoked() {
   }
 }
 
+async function testUnfollowByUri() {
+  // followUri path: tool should hand the URI straight to deleteFollow
+  // without listing records or resolving handles.
+  let deleted: string | null = null;
+  let listRecordsCalls = 0;
+  const fakeAgent = {
+    did: "did:plc:alice",
+    deleteFollow: async (uri: string) => { deleted = uri; },
+    com: {
+      atproto: {
+        repo: {
+          listRecords: async () => {
+            listRecordsCalls += 1;
+            return { success: true, data: { records: [], cursor: undefined } };
+          },
+        },
+      },
+    },
+  } as unknown as Agent;
+
+  const { client, close } = await harness(() => fakeAgent);
+  try {
+    const uri = "at://did:plc:alice/app.bsky.graph.follow/3kxyz";
+    const result: any = await client.callTool({
+      name: "unfollow-user",
+      arguments: { followUri: uri },
+    });
+    assert.equal(result.isError, undefined);
+    assert.equal(deleted, uri, "deleteFollow should be called with the supplied URI");
+    assert.equal(listRecordsCalls, 0, "no listRecords scan should happen when followUri is provided");
+  } finally {
+    await close();
+  }
+}
+
+async function testUnfollowRejectsForeignUri() {
+  // Defensive check: a URI whose repo isn't the authenticated user should
+  // be rejected locally instead of forwarded to the server.
+  let deleted: string | null = null;
+  const fakeAgent = {
+    did: "did:plc:alice",
+    deleteFollow: async (uri: string) => { deleted = uri; },
+  } as unknown as Agent;
+
+  const { client, close } = await harness(() => fakeAgent);
+  try {
+    const result: any = await client.callTool({
+      name: "unfollow-user",
+      arguments: { followUri: "at://did:plc:bob/app.bsky.graph.follow/3kxyz" },
+    });
+    assert.equal(result.isError, true);
+    assert.equal(deleted, null, "deleteFollow must not be called for a foreign URI");
+    assert.match(result.content[0].text, /not the authenticated user/);
+  } finally {
+    await close();
+  }
+}
+
+async function testUnfollowByUserScansForRkey() {
+  // user path: tool resolves handle → DID, then walks listRecords pages
+  // until it finds the matching subject, then deletes that record's URI.
+  let deleted: string | null = null;
+  const targetUri = "at://did:plc:alice/app.bsky.graph.follow/3krealrkey";
+  const fakeAgent = {
+    did: "did:plc:alice",
+    deleteFollow: async (uri: string) => { deleted = uri; },
+    getProfile: async (_: { actor: string }) => ({
+      success: true,
+      data: { did: "did:plc:bob", handle: "bob.test" },
+    }),
+    com: {
+      atproto: {
+        repo: {
+          listRecords: async () => ({
+            success: true,
+            data: {
+              records: [
+                { uri: "at://did:plc:alice/app.bsky.graph.follow/3kother", value: { subject: "did:plc:carol" } },
+                { uri: targetUri, value: { subject: "did:plc:bob" } },
+              ],
+              cursor: undefined,
+            },
+          }),
+        },
+      },
+    },
+  } as unknown as Agent;
+
+  const { client, close } = await harness(() => fakeAgent);
+  try {
+    const result: any = await client.callTool({
+      name: "unfollow-user",
+      arguments: { user: "bob.test" },
+    });
+    assert.equal(result.isError, undefined);
+    assert.equal(deleted, targetUri, "should delete the URI whose subject matched the resolved DID");
+  } finally {
+    await close();
+  }
+}
+
 async function main() {
   const cases: Array<[string, () => Promise<void>]> = [
-    ["registers exactly the expected 21 tools", testExpectedToolSet],
+    ["registers exactly the expected 22 tools", testExpectedToolSet],
     ["tools error out when getAgent returns null", testNullAgentReturnsError],
     ["getAgent is resolved per tool call, not cached", testAgentIsResolvedPerCall],
     ["tool handlers invoke methods on the resolved agent", testAgentMethodIsInvoked],
+    ["unfollow-user with followUri deletes directly", testUnfollowByUri],
+    ["unfollow-user rejects URIs that aren't the authed user's", testUnfollowRejectsForeignUri],
+    ["unfollow-user with user scans listRecords for the rkey", testUnfollowByUserScansForRkey],
   ];
 
   let failed = 0;

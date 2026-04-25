@@ -649,6 +649,95 @@ Feed Link: https://bsky.app${topic.link}
   );
 
   server.tool(
+    "unfollow-user",
+    "Remove an existing follow from the authenticated user's Bluesky account. Pass followUri (preferred — the at:// URI of your follow record, as returned by get-follows for self) for a direct delete with no extra round trips. If you only have a handle or DID, pass user instead and the tool will scan your follow records to find the matching rkey before deleting.",
+    {
+      followUri: z.string().optional().describe("The at:// URI of YOUR follow record to delete (e.g., at://did:plc:you/app.bsky.graph.follow/3kabc...). Returned by get-follows for the self path. Mutually exclusive with `user`."),
+      user: z.string().optional().describe("The handle or DID of the followee. Used when you don't already have the follow record URI; the tool will list your follow records to find the matching rkey. Mutually exclusive with `followUri`."),
+    },
+    async ({ followUri, user }) => {
+      const agent = getAgent();
+      if (!agent) {
+        return mcpErrorResponse("Not logged in. Please check your environment variables.");
+      }
+      if (!agent.did) {
+        return mcpErrorResponse("Not authenticated.");
+      }
+      if (!followUri && !user) {
+        return mcpErrorResponse("Provide either followUri or user.");
+      }
+      if (followUri && user) {
+        return mcpErrorResponse("Provide only one of followUri or user, not both.");
+      }
+
+      try {
+        let uriToDelete = followUri;
+        let label = followUri ?? '';
+
+        if (!uriToDelete) {
+          // Look up the rkey by scanning the authenticated user's follow
+          // records for one whose subject matches the requested followee.
+          // Costs one listRecords page (100 records) per ~100 follows the
+          // user has; if you already have the URI, prefer that path.
+          const profileRes = await agent.getProfile({ actor: cleanHandle(user!) });
+          if (!profileRes.success) {
+            return mcpErrorResponse(`User not found: ${user}`);
+          }
+          const targetDid = profileRes.data.did;
+          if (targetDid === agent.did) {
+            return mcpErrorResponse("You can't unfollow yourself.");
+          }
+
+          let cursor: string | undefined;
+          let foundUri: string | undefined;
+          while (!foundUri) {
+            const res = await agent.com.atproto.repo.listRecords({
+              repo: agent.did,
+              collection: 'app.bsky.graph.follow',
+              limit: 100,
+              cursor,
+            });
+            if (!res.success) break;
+            for (const r of res.data.records) {
+              const subject = (r.value as { subject?: unknown })?.subject;
+              if (subject === targetDid) {
+                foundUri = r.uri;
+                break;
+              }
+            }
+            cursor = res.data.cursor;
+            if (!cursor || res.data.records.length === 0) break;
+          }
+          if (!foundUri) {
+            return mcpSuccessResponse(`You are not currently following @${user} (${targetDid}); nothing to unfollow.`);
+          }
+          uriToDelete = foundUri;
+          label = `@${profileRes.data.handle} (${targetDid})`;
+        } else {
+          // Sanity-check that the URI is one of the authenticated user's
+          // own follow records. The server would reject foreign URIs, but
+          // a clear local error is friendlier than a 4xx surface.
+          const parts = uriToDelete.split('/');
+          // at://{repo}/{collection}/{rkey} → ['at:', '', repo, collection, rkey]
+          const repo = parts[2];
+          const collection = parts[3];
+          if (repo !== agent.did) {
+            return mcpErrorResponse(`followUri belongs to ${repo}, not the authenticated user (${agent.did}). You can only delete your own follow records.`);
+          }
+          if (collection !== 'app.bsky.graph.follow') {
+            return mcpErrorResponse(`followUri is a ${collection} record, not app.bsky.graph.follow.`);
+          }
+        }
+
+        await agent.deleteFollow(uriToDelete);
+        return mcpSuccessResponse(`Unfollowed ${label || uriToDelete}.`);
+      } catch (error) {
+        return mcpErrorResponse(`Error unfollowing user: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  server.tool(
     "get-pinned-feeds",
     "Get the authenticated user's pinned feeds and lists.",
     {},
