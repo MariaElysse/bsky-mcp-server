@@ -8,147 +8,181 @@ export interface LinkMetadata {
 }
 
 /**
- * Fetch Open Graph metadata from a URL
- * Uses native fetch (available in Node 18+)
+ * cardyb is Bluesky's hosted link-unfurl service — the same one the official
+ * app uses. It fetches the target page, extracts OpenGraph/Twitter-card
+ * metadata, and resizes the card image, all behind its own byte/time/
+ * content-type limits.
+ *
+ * Delegating to it (instead of fetching the page ourselves) is a deliberate
+ * memory-safety choice: the previous in-process implementation did an
+ * unbounded `response.text()` on an arbitrary, model-supplied URL and an
+ * `arrayBuffer()` that only checked the 1 MB image cap *after* fully
+ * buffering. A 15 s timeout bounds time, not bytes, so a single create-post
+ * pointed at a large page/image could buffer hundreds of MB — which OOM'd the
+ * (1.8 GiB, swapless) host on 2026-05-29. Letting cardyb do the fetching means
+ * this process never reads attacker-influenced bodies and never has to defend
+ * against SSRF on the third-party-controlled og:image.
  */
-export async function fetchLinkMetadata(url: string): Promise<LinkMetadata | null> {
-  try {
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Bluesky MCP Server/1.0',
-        'Accept': 'text/html',
-      },
-      signal: AbortSignal.timeout(15000), // 15 second timeout
-    });
+const CARDYB_URL = (process.env.CARDYB_URL ?? 'https://cardyb.bsky.app').replace(/\/$/, '');
 
-    if (!response.ok) {
-      console.error(`Failed to fetch ${url}: ${response.status}`);
-      return null;
-    }
+// cardyb returns small JSON; cap the read anyway so a misbehaving or proxied
+// endpoint can't stream unboundedly into us.
+const MAX_EXTRACT_BYTES = 64 * 1024; // 64 KB
+// Bluesky's thumbnail blob limit. cardyb already resizes below this, but we
+// still pull the image into memory to upload it as a PDS blob, so we cap the
+// read as defence in depth.
+const MAX_THUMB_BYTES = 1_000_000; // 1 MB
+const EXTRACT_TIMEOUT_MS = 10_000;
+const THUMB_TIMEOUT_MS = 15_000;
 
-    const html = await response.text();
-    return parseOgMetadata(html, url);
-  } catch (error) {
-    console.error(`Error fetching link metadata for ${url}:`, error);
+interface CardybExtract {
+  error?: string;
+  likely_type?: string;
+  url?: string;
+  title?: string;
+  description?: string;
+  image?: string;
+}
+
+/**
+ * Read a fetch Response body, aborting once `maxBytes` is exceeded. Returns
+ * null if the declared Content-Length or the streamed size blows the cap (or
+ * there's no body). This is the byte-bound the old `.text()`/`.arrayBuffer()`
+ * calls lacked.
+ */
+async function readCapped(res: Response, maxBytes: number): Promise<Uint8Array | null> {
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
     return null;
   }
+
+  const reader = res.body?.getReader();
+  if (!reader) {
+    return null;
+  }
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      // Stop pulling bytes and let the connection tear down.
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
 }
 
 /**
- * Parse OG/Twitter Card metadata from HTML
+ * Fetch link-card metadata for a URL via cardyb.
+ * Returns null when no usable card can be produced (cardyb error, non-HTML
+ * target, request failure, ...); callers treat that as "post without a card".
  */
-function parseOgMetadata(html: string, url: string): LinkMetadata {
-  // Helper to extract meta content (handles both orders of property/content)
-  const getMeta = (property: string): string | null => {
-    // Pattern 1: property="..." content="..."
-    const pattern1 = new RegExp(`<meta[^>]*property=["']${property}["'][^>]*content=["']([^"']+)["']`, 'i');
-    // Pattern 2: content="..." property="..."
-    const pattern2 = new RegExp(`<meta[^>]*content=["']([^"']+)["'][^>]*property=["']${property}["']`, 'i');
-    // Twitter card uses 'name' instead of 'property'
-    const pattern3 = new RegExp(`<meta[^>]*name=["']${property}["'][^>]*content=["']([^"']+)["']`, 'i');
-    const pattern4 = new RegExp(`<meta[^>]*content=["']([^"']+)["'][^>]*name=["']${property}["']`, 'i');
+export async function fetchLinkMetadata(url: string): Promise<LinkMetadata | null> {
+  let response: Response;
+  try {
+    response = await fetch(`${CARDYB_URL}/v1/extract?url=${encodeURIComponent(url)}`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(EXTRACT_TIMEOUT_MS),
+    });
+  } catch (error) {
+    console.error(`cardyb extract request failed for ${url}:`, error);
+    return null;
+  }
 
-    const match = html.match(pattern1) || html.match(pattern2) ||
-                  html.match(pattern3) || html.match(pattern4);
-    return match ? decodeHtmlEntities(match[1]) : null;
-  };
+  // cardyb returns a non-2xx when it can't fetch or parse the target.
+  if (!response.ok) {
+    console.error(`cardyb extract ${url}: HTTP ${response.status}`);
+    return null;
+  }
 
-  // Try OG tags first, fall back to Twitter Card, then standard HTML
-  const title = getMeta('og:title') ||
-                getMeta('twitter:title') ||
-                extractTitleTag(html) ||
-                url;
+  const body = await readCapped(response, MAX_EXTRACT_BYTES);
+  if (!body) {
+    console.error(`cardyb extract ${url}: response exceeded ${MAX_EXTRACT_BYTES} bytes`);
+    return null;
+  }
 
-  const description = getMeta('og:description') ||
-                      getMeta('twitter:description') ||
-                      getMeta('description') ||
-                      '';
+  let data: CardybExtract;
+  try {
+    data = JSON.parse(new TextDecoder().decode(body)) as CardybExtract;
+  } catch {
+    console.error(`cardyb extract ${url}: invalid JSON response`);
+    return null;
+  }
 
-  const imageUrl = getMeta('og:image') ||
-                   getMeta('twitter:image') ||
-                   getMeta('twitter:image:src');
+  // cardyb signals a failed unfurl with a non-empty `error`. Not an error for
+  // us — we just post without a card.
+  if (data.error) {
+    return null;
+  }
 
   return {
-    url,
-    title: title.substring(0, 300), // Bluesky has length limits
-    description: description.substring(0, 1000),
-    imageUrl: imageUrl ? resolveUrl(imageUrl, url) : undefined,
+    url: data.url || url,
+    // Bluesky enforces length limits on the embed; cardyb usually trims, but
+    // keep the guard so an over-long field can't be rejected at post time.
+    title: (data.title || url).substring(0, 300),
+    description: (data.description || '').substring(0, 1000),
+    imageUrl: data.image || undefined,
   };
 }
 
-function extractTitleTag(html: string): string | null {
-  const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-  return match ? decodeHtmlEntities(match[1].trim()) : null;
-}
-
-function decodeHtmlEntities(text: string): string {
-  return text
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'");
-}
-
-function resolveUrl(imageUrl: string, baseUrl: string): string {
-  try {
-    return new URL(imageUrl, baseUrl).href;
-  } catch {
-    return imageUrl;
-  }
-}
-
 /**
- * Download image and upload to Bluesky
- * Returns BlobRef for the uploaded image
+ * Download a cardyb-hosted (already-resized) card image and upload it to the
+ * user's PDS as a blob for use as an external-embed thumbnail.
+ * Returns the BlobRef, or null on any failure / oversize.
  */
 export async function uploadThumbnail(
   agent: Agent,
-  imageUrl: string
+  imageUrl: string,
 ): Promise<BlobRef | null> {
+  let response: Response;
   try {
-    const response = await fetch(imageUrl, {
-      headers: {
-        'User-Agent': 'Bluesky MCP Server/1.0',
-      },
-      signal: AbortSignal.timeout(20000), // 20 second timeout for images
+    response = await fetch(imageUrl, {
+      headers: { Accept: 'image/*' },
+      signal: AbortSignal.timeout(THUMB_TIMEOUT_MS),
     });
+  } catch (error) {
+    console.error(`Error fetching thumbnail ${imageUrl}:`, error);
+    return null;
+  }
 
-    if (!response.ok) {
-      console.error(`Failed to download image ${imageUrl}: ${response.status}`);
-      return null;
-    }
+  if (!response.ok) {
+    console.error(`Failed to download thumbnail ${imageUrl}: ${response.status}`);
+    return null;
+  }
 
-    const contentType = response.headers.get('content-type') || 'image/jpeg';
+  const contentType = response.headers.get('content-type') || 'image/jpeg';
+  if (!contentType.startsWith('image/')) {
+    console.error(`Thumbnail URL is not an image: ${contentType}`);
+    return null;
+  }
 
-    // Validate it's an image
-    if (!contentType.startsWith('image/')) {
-      console.error(`URL is not an image: ${contentType}`);
-      return null;
-    }
+  const bytes = await readCapped(response, MAX_THUMB_BYTES);
+  if (!bytes) {
+    console.error(`Thumbnail ${imageUrl} exceeded ${MAX_THUMB_BYTES} bytes; skipping card image`);
+    return null;
+  }
 
-    const imageData = await response.arrayBuffer();
-
-    // Check size (Bluesky limit is 1MB for thumbnails)
-    if (imageData.byteLength > 1000000) {
-      console.error(`Image too large: ${imageData.byteLength} bytes`);
-      return null;
-    }
-
-    // Upload to Bluesky
-    const uploadResponse = await agent.uploadBlob(new Uint8Array(imageData), {
-      encoding: contentType,
-    });
-
+  try {
+    const uploadResponse = await agent.uploadBlob(bytes, { encoding: contentType });
     if (!uploadResponse.success) {
-      console.error('Failed to upload blob');
+      console.error('Failed to upload thumbnail blob');
       return null;
     }
-
     return uploadResponse.data.blob;
   } catch (error) {
-    console.error(`Error uploading thumbnail:`, error);
+    console.error('Error uploading thumbnail:', error);
     return null;
   }
 }
