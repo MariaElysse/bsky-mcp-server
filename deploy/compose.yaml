@@ -10,6 +10,15 @@ services:
     # routing.
     network_mode: host
     restart: unless-stopped
+    # Hard memory backstop. Without this the container's growth competes with
+    # the host and co-located PDS; a leak then triggers a *global* OOM that
+    # freezes the whole box (2026-05-29 incident). With it, the kernel kills
+    # only this container's cgroup and `restart: unless-stopped` recovers it.
+    # Sized above NODE_OPTIONS=--max-old-space-size (256 MB, see
+    # Dockerfile.remote) so V8's own heap ceiling normally fires first with a
+    # clean exit; this limit is the backstop for native/non-heap growth. Tune
+    # to real usage — keep it comfortably under what the co-tenant PDS needs.
+    mem_limit: 384m
     env_file:
       - /etc/bsky-mcp/env
     volumes:

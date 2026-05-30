@@ -40,6 +40,17 @@ COPY --from=build /app/package.json ./package.json
 USER node
 
 ENV NODE_ENV=production
+
+# Cap V8's old-space heap well below the container's mem_limit (see
+# deploy/compose.yaml). This is the *primary* memory guard: if the heap
+# runs away, V8 throws "JavaScript heap out of memory" and the process
+# exits cleanly, so `restart: unless-stopped` brings it back — instead of
+# the kernel SIGKILLing it mid-request (or, with no container limit at all,
+# triggering a host-wide OOM as in the 2026-05-29 incident). Tune in tandem
+# with mem_limit: keep this lower by enough to cover non-heap RSS (native
+# better-sqlite3/undici buffers + Node baseline, ~100-130 MB).
+ENV NODE_OPTIONS="--max-old-space-size=256"
+
 EXPOSE 8787
 
 CMD ["node", "build/src/remote/index.js"]
