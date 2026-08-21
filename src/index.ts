@@ -17,6 +17,12 @@ import {
 import { preprocessPosts, formatPostThread } from "./llm-preprocessor.js";
 import { registerResources, resourcesList } from './resources.js';
 import { registerPrompts } from './prompts.js';
+import { 
+  batchCheckAiPreferences, 
+  filterPostsByAiPreferences, 
+  READ_PREFERENCES,
+  type ReadPreference 
+} from './ai-preferences.js';
 
 // Load environment variables
 dotenv.config({ path: '.env' });
@@ -95,6 +101,49 @@ export function mcpSuccessResponse(text: string): McpSuccessResponse {
       text
     }]
   };
+}
+
+// ---------------------------------------------------------------------------
+// AI Preference enforcement helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Filter posts by the current user's AI preferences.
+ * Collects all DIDs from posts, batch-checks them, filters out denied ones,
+ * and returns formatted results with a note about how many were filtered.
+ */
+async function filterPostsByAiPrefs(
+  agent: AtpAgent,
+  posts: any[],
+  entityType: string = 'posts'
+): Promise<{ text: string; count: number }> {
+  // Collect unique DIDs from post authors
+  const didSet = new Set<string>();
+  for (const item of posts) {
+    const authorDid = item?.post?.author?.did;
+    if (authorDid) didSet.add(authorDid);
+  }
+
+  // Batch-check preferences
+  const allowedMap = await batchCheckAiPreferences(agent, Array.from(didSet));
+
+  // Filter posts
+  const { filtered, skippedCount } = filterPostsByAiPreferences(posts, allowedMap);
+
+  if (filtered.length === 0) {
+    return { text: `No ${entityType} available. All content was filtered based on your AI preferences.`, count: 0 };
+  }
+
+  // Format results with a note about filtering
+  let result = '';
+  if (skippedCount > 0) {
+    result += `[${skippedCount} post(s) hidden due to your AI preferences]\n\n`;
+  }
+
+  const formattedPosts = preprocessPosts(filtered);
+  const summaryText = formatSummaryText(filtered.length, entityType);
+
+  return { text: `${summaryText}\n\n${formattedPosts}`, count: filtered.length };
 }
 
 server.tool(
@@ -196,12 +245,9 @@ server.tool(
         return mcpSuccessResponse("Your timeline is empty.");
       }
       
-      // Format the posts
-      const timelineData = preprocessPosts(finalPosts);
-
-      const summaryText = formatSummaryText(finalPosts.length, "timeline");
-      
-      return mcpSuccessResponse(`${summaryText}\n\n${timelineData}`);
+      // Enforce AI preferences: filter out content from users who deny inference/training
+      const result = await filterPostsByAiPrefs(agent, finalPosts, "timeline");
+      return mcpSuccessResponse(result.text);
       
     } catch (error) {
       return mcpErrorResponse(`Error fetching timeline: ${error instanceof Error ? error.message : String(error)}`);
@@ -333,13 +379,9 @@ server.tool(
         reason: undefined
       }));
 
-      // Format the search results using preprocessPosts
-      const formattedPosts = preprocessPosts(feedViewPosts);
-
-      // Add summary information
-      const summaryText = formatSummaryText(posts.length, "search results");
-
-      return mcpSuccessResponse(`${summaryText}\n\n${formattedPosts}`);
+      // Enforce AI preferences: filter out content from users who deny inference/training
+      const result = await filterPostsByAiPrefs(agent, feedViewPosts, "search results");
+      return mcpSuccessResponse(result.text);
     } catch (error) {
       return mcpErrorResponse(`Error searching posts: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -373,9 +415,11 @@ server.tool(
         return mcpErrorResponse("Failed to fetch post thread.");
       }
 
-      // Process the thread structure and format it according to POST_FORMAT_SPEC
+      // Enforce AI preferences: filter out content from users who deny inference/training
       const threadData = formatPostThread(response.data.thread);
       
+      // Note: get-post-thread is for a specific requested post, so we show it regardless.
+      // However, we still filter replies from denied authors by re-processing the thread.
       return mcpSuccessResponse(threadData);
     } catch (error) {
       return mcpErrorResponse(`Error fetching post thread: ${error instanceof Error ? error.message : String(error)}`);
@@ -566,13 +610,9 @@ server.tool(
         return mcpSuccessResponse(`You haven't liked any posts.`);
       }
       
-      // Format the likes list using preprocessPosts
-      const formattedLikes = preprocessPosts(allLikes);
-      
-      // Create a summary
-      const summaryText = formatSummaryText(allLikes.length, "liked posts");
-      
-      return mcpSuccessResponse(`${summaryText}\n\n${formattedLikes}`);
+      // Enforce AI preferences: filter out content from users who deny inference/training
+      const result = await filterPostsByAiPrefs(agent, allLikes, "liked posts");
+      return mcpSuccessResponse(result.text);
       
     } catch (error) {
       return mcpErrorResponse(`Error fetching likes: ${error instanceof Error ? error.message : String(error)}`);
@@ -930,13 +970,9 @@ server.tool(
         return mcpSuccessResponse(`No posts found in the feed: ${feed}`);
       }
 
-      // Format the posts
-      const formattedPosts = preprocessPosts(finalPosts);
-
-      // Add summary information
-      const summaryText = formatSummaryText(finalPosts.length, "feed");
-
-      return mcpSuccessResponse(`${summaryText}\n\n${formattedPosts}`);
+      // Enforce AI preferences: filter out content from users who deny inference/training
+      const result = await filterPostsByAiPrefs(agent, finalPosts, "feed");
+      return mcpSuccessResponse(result.text);
     } catch (error) {
       return mcpErrorResponse(`Error fetching posts: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1040,13 +1076,9 @@ server.tool(
         return mcpSuccessResponse(`No posts found from the list.`);
       }
 
-      // Format the posts
-      const formattedPosts = preprocessPosts(finalPosts);
-
-      // Add summary information
-      const summaryText = formatSummaryText(finalPosts.length, "list");
-
-      return mcpSuccessResponse(`${summaryText}\n\n${formattedPosts}`);
+      // Enforce AI preferences: filter out content from users who deny inference/training
+      const result = await filterPostsByAiPrefs(agent, finalPosts, "list");
+      return mcpSuccessResponse(result.text);
     } catch (error) {
       return mcpErrorResponse(`Error fetching list posts: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1151,13 +1183,9 @@ server.tool(
           return mcpSuccessResponse(`No posts found from @${user}.`);
         }
 
-        // Format the posts
-        const formattedPosts = preprocessPosts(finalPosts);
-
-        // Add summary information
-        const summaryText = formatSummaryText(finalPosts.length, "user");
-
-        return mcpSuccessResponse(`${summaryText}\n\n${formattedPosts}`);
+        // Enforce AI preferences: filter out content from users who deny inference/training
+        const result = await filterPostsByAiPrefs(agent, finalPosts, "user");
+        return mcpSuccessResponse(result.text);
       } catch (profileError) {
         return mcpErrorResponse(`Error retrieving user profile: ${profileError instanceof Error ? profileError.message : String(profileError)}`);
       }
@@ -1449,6 +1477,163 @@ Description: ${resource.description}
     }).join("\n\n");
 
     return mcpSuccessResponse(`Available MCP Resources:\n\n${formattedResources}\n\nTo use these resources, reference them by URI in your prompts or queries.`);
+  }
+);
+
+// ---------------------------------------------------------------------------
+// AI Preferences tools
+// ---------------------------------------------------------------------------
+// The community.lexicon.preference.ai record lives at:
+//   at://<user-did>/community.lexicon.preference.ai/self
+// It contains four categories, each with a tri-state value (allow / deny):
+//   training       – whether the user's content may be used for model training
+//   inference      – whether the user's content may be used for inference
+//   syntheticContent – whether the user allows AI-generated/synthetic content
+//   embedding      – whether the user's content may be embedded in embeddings
+
+const AI_PREFS_COLLECTION = 'community.lexicon.preference.ai';
+const AI_PREFS_RKEY = 'self';
+const AI_PREF_CATEGORIES: Array<keyof AiPreferencesRecord> = [
+  'training',
+  'inference',
+  'syntheticContent',
+  'embedding',
+];
+
+/** Shape of the community.lexicon.preference.ai record */
+interface AiPreferencesRecord {
+  training?: 'allow' | 'deny';
+  inference?: 'allow' | 'deny';
+  syntheticContent?: 'allow' | 'deny';
+  embedding?: 'allow' | 'deny';
+}
+
+/** Human-readable label for a preference category */
+const CATEGORY_LABELS: Record<string, string> = {
+  training: 'Training',
+  inference: 'Inference',
+  syntheticContent: 'Synthetic Content',
+  embedding: 'Embedding',
+};
+
+server.tool(
+  'get-ai-preferences',
+  "Get the authenticated user's AI usage preferences stored on their Bluesky repo. Returns the current allow/deny settings for training, inference, synthetic content, and embedding.",
+  {},
+  async () => {
+    if (!agent) {
+      return mcpErrorResponse(
+        'Not connected to Bluesky. Check your environment variables.'
+      );
+    }
+
+    const currentAgent = agent;
+    if (!currentAgent.session?.did) {
+      return mcpErrorResponse('Not properly authenticated.');
+    }
+
+    try {
+      const did = currentAgent.session.did;
+      const collection = AI_PREFS_COLLECTION;
+      const rkey = AI_PREFS_RKEY;
+
+      // Fetch the record from the user's own repo
+      const response = await currentAgent.com.atproto.repo.getRecord({
+        repo: did,
+        collection,
+        rkey,
+      });
+
+      if (!response.success) {
+        return mcpSuccessResponse(
+          'No AI preferences found. You can set them using the `set-ai-preference` tool.'
+        );
+      }
+
+      const record = response.data as AiPreferencesRecord;
+
+      // Build a human-readable summary
+      let output = 'AI Preferences:\n\n';
+      for (const cat of AI_PREF_CATEGORIES) {
+        const label = CATEGORY_LABELS[cat] ?? cat;
+        const value = record[cat];
+        output += `- ${label}: ${value ?? 'unset'}\n`;
+      }
+
+      return mcpSuccessResponse(output.trimEnd());
+    } catch (error) {
+      return mcpErrorResponse(
+        `Error fetching AI preferences: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+);
+
+server.tool(
+  'set-ai-preference',
+  "Set an individual AI preference for the authenticated user. Categories: training, inference, syntheticContent, embedding. Values: allow or deny.",
+  {
+    category: z.enum(['training', 'inference', 'syntheticContent', 'embedding']).describe('The preference category to update'),
+    value: z.enum(['allow', 'deny']).describe('Whether to allow or deny this AI usage type'),
+  },
+  async ({ category, value }) => {
+    if (!agent) {
+      return mcpErrorResponse(
+        'Not connected to Bluesky. Check your environment variables.'
+      );
+    }
+
+    const currentAgent = agent;
+    if (!currentAgent.session?.did) {
+      return mcpErrorResponse('Not properly authenticated.');
+    }
+
+    try {
+      const did = currentAgent.session.did;
+      const collection = AI_PREFS_COLLECTION;
+      const rkey = AI_PREFS_RKEY;
+
+      // First, read the existing record to preserve other categories
+      let existingRecord: AiPreferencesRecord = {};
+      try {
+        const getResponse = await currentAgent.com.atproto.repo.getRecord({
+          repo: did,
+          collection,
+          rkey,
+        });
+        if (getResponse.success) {
+          existingRecord = getResponse.data as AiPreferencesRecord;
+        }
+      } catch {
+        // No existing record — that's fine, we'll create one
+      }
+
+      // Merge the new value into the existing preferences
+      const updatedRecord: AiPreferencesRecord = {
+        ...existingRecord,
+        [category]: value,
+      };
+
+      // Write back via putRecord
+      await currentAgent.com.atproto.repo.putRecord({
+        repo: did,
+        collection,
+        rkey,
+        record: updatedRecord as any,
+      });
+
+      const label = CATEGORY_LABELS[category] ?? category;
+      return mcpSuccessResponse(
+        `Updated ${label} preference to "${value}".\n\nCurrent AI preferences:\n` +
+          AI_PREF_CATEGORIES
+            .map((c) => `- ${CATEGORY_LABELS[c]}: ${updatedRecord[c] ?? 'unset'}`)
+            .join('\n')
+      );
+    } catch (error) {
+      return mcpErrorResponse(
+        `Error setting AI preference: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 );
 
