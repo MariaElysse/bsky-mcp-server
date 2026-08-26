@@ -1519,8 +1519,10 @@ const CATEGORY_LABELS: Record<string, string> = {
 server.tool(
   'get-ai-preferences',
   "Get the authenticated user's AI usage preferences stored on their Bluesky repo. Returns the current allow/deny settings for training, inference, synthetic content, and embedding.",
-  {},
-  async () => {
+  {
+    user_id: z.string().optional().describe('The target user\'s handle (e.g., alice.bsky.social) or DID (e.g., did:plc:abcdef). If omitted, returns preferences for the authenticated user.'),
+  },
+  async ({ user_id }) => {
     if (!agent) {
       return mcpErrorResponse(
         'Not connected to Bluesky. Check your environment variables.'
@@ -1528,16 +1530,35 @@ server.tool(
     }
 
     const currentAgent = agent;
-    if (!currentAgent.session?.did) {
-      return mcpErrorResponse('Not properly authenticated.');
+
+    // Resolve target DID: use provided user_id or fall back to authenticated session
+    let did: string;
+    if (user_id) {
+      const cleaned = cleanHandle(user_id);
+      if (cleaned.startsWith('did:')) {
+        did = cleaned;
+      } else {
+        // Resolve handle → DID via atproto API
+        const resolveResp = await currentAgent.resolveHandle({ handle: cleaned });
+        if (!resolveResp || !resolveResp.data?.did) {
+          return mcpErrorResponse(
+            `Could not find a user with handle "${user_id}". Please check the handle and try again.`
+          );
+        }
+        did = resolveResp.data.did;
+      }
+    } else {
+      if (!currentAgent.session?.did) {
+        return mcpErrorResponse('Not properly authenticated.');
+      }
+      did = currentAgent.session.did;
     }
 
     try {
-      const did = currentAgent.session.did;
       const collection = AI_PREFS_COLLECTION;
       const rkey = AI_PREFS_RKEY;
 
-      // Fetch the record from the user's own repo
+      // Fetch the record from the target user's repo
       const response = await currentAgent.com.atproto.repo.getRecord({
         repo: did,
         collection,
@@ -1546,14 +1567,14 @@ server.tool(
 
       if (!response.success) {
         return mcpSuccessResponse(
-          'No AI preferences found. You can set them using the `set-ai-preference` tool.'
+          'No AI preferences found for this user. They may not have set any preferences yet.'
         );
       }
 
       const record = response.data as AiPreferencesRecord;
 
       // Build a human-readable summary
-      let output = 'AI Preferences:\n\n';
+      let output = `AI Preferences for ${did}:\n\n`;
       for (const cat of AI_PREF_CATEGORIES) {
         const label = CATEGORY_LABELS[cat] ?? cat;
         const value = record[cat];
