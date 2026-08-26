@@ -4,7 +4,7 @@
  * content may be fetched under the current user's preferences.
  */
 
-import { AtpAgent } from '@atproto/api';
+import { Agent } from '@atproto/api';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,7 +66,7 @@ export function isContentAllowed(
  * Fetch a DID's AI preferences from their repo and cache the result.
  */
 export async function fetchAiPreferences(
-  agent: AtpAgent,
+  agent: Agent,
   did: string
 ): Promise<AiPreferencesRecord | null> {
   try {
@@ -97,7 +97,7 @@ export async function fetchAiPreferences(
  * content from that user may be read.
  */
 export async function checkAiPreference(
-  agent: AtpAgent,
+  agent: Agent,
   did: string,
   prefs: ReadPreference[] = READ_PREFERENCES
 ): Promise<boolean> {
@@ -125,7 +125,7 @@ export async function checkAiPreference(
  * a map from DID → allowed boolean.
  */
 export async function batchCheckAiPreferences(
-  agent: AtpAgent,
+  agent: Agent,
   dids: string[],
   prefs: ReadPreference[] = READ_PREFERENCES
 ): Promise<Map<string, boolean>> {
