@@ -29,8 +29,6 @@ const EXPECTED_TOOLS = [
   "get-followers",
   "get-post-likes",
   "list-resources",
-  "get-ai-preferences",
-  "set-ai-preference",
 ];
 
 async function harness(provider: AgentProvider) {
@@ -49,7 +47,7 @@ async function testExpectedToolSet() {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name).sort();
     assert.deepEqual(names, [...EXPECTED_TOOLS].sort(),
-      `registered tool set drifted from the 25 expected names`);
+      `registered tool set drifted from the 23 expected names`);
   } finally {
     await close();
   }
