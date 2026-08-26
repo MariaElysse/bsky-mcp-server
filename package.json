@@ -17,7 +17,8 @@
     "start:remote": "node build/src/remote/index.js",
     "generate-signing-key": "pnpm run build && node build/src/scripts/generate-signing-key.js",
     "process-posts": "pnpm run build && node build/src/scripts/process-post-examples.js",
-    "process-threads": "pnpm run build && node build/src/scripts/process-thread-examples.js"
+    "process-threads": "pnpm run build && node build/src/scripts/process-thread-examples.js",
+    "workspace-push": "npx ts-node src/scripts/workspace-push.ts"
   },
   "keywords": [
     "bluesky",
