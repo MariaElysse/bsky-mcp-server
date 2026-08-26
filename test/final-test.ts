@@ -16,7 +16,7 @@ interface SuiteResult {
   passed: boolean;
 }
 
-function runSuite(name, cmd) {
+function runSuite(name: string, cmd: string) {
   try {
     execSync(cmd, { stdio: "inherit" });
     return { name, passed: true };

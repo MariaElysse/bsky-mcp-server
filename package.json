@@ -5,7 +5,7 @@
   "main": "build/src/index.js",
   "type": "module",
   "scripts": {
-    "build": "tsc && chmod 755 build/src/index.js && mkdir -p build/test",
+    "build": "tsc && node -e \"const fs=require('fs'),cp=require('child_process'),p='build/src/index.js';if(fs.existsSync(p))fs.chmodSync(p,0o755);try{fs.mkdirSync('build/test',{recursive:true})}catch(e){}\"",
     "start": "node build/src/index.js",
     "dev": "tsc && node build/src/index.js",
     "test": "pnpm run build && node build/test/final-test.js",
