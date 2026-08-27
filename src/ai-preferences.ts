@@ -10,12 +10,62 @@ import { AtpAgent } from '@atproto/api';
 // Types
 // ---------------------------------------------------------------------------
 
-/** Shape of community.lexicon.preference.ai record */
+/** Shape of a single category entry inside preferences (actual API format) */
+interface AiPrefCategoryRaw {
+  allow: boolean;
+  updatedAt?: string;
+}
+
+/** Shape of community.lexicon.preference.ai record as returned by the API */
+export interface AiPreferencesRecordRaw {
+  scope?: unknown;
+  updatedAt?: string;
+  preferences?: {
+    training?: AiPrefCategoryRaw;
+    inference?: AiPrefCategoryRaw;
+    syntheticContent?: AiPrefCategoryRaw;
+    embedding?: AiPrefCategoryRaw;
+  };
+}
+
+/** Flat allow/deny representation used internally */
 export interface AiPreferencesRecord {
   training?: 'allow' | 'deny';
   inference?: 'allow' | 'deny';
   syntheticContent?: 'allow' | 'deny';
   embedding?: 'allow' | 'deny';
+}
+
+/** Convert a nested boolean allow to 'allow' | 'deny' */
+function boolToAllowDeny(allow: boolean | undefined): 'allow' | 'deny' {
+  return allow !== false ? 'allow' : 'deny';
+}
+
+/** Extract the flat allow/deny record from the nested API response. */
+export function flattenAiPreferences(record: AiPreferencesRecordRaw): AiPreferencesRecord {
+  const p = record.preferences ?? {};
+  return {
+    training: boolToAllowDeny(p.training?.allow),
+    inference: boolToAllowDeny(p.inference?.allow),
+    syntheticContent: boolToAllowDeny(p.syntheticContent?.allow),
+    embedding: boolToAllowDeny(p.embedding?.allow),
+  };
+}
+
+/** Convert a flat allow/deny record back to the nested API format. */
+export function unflattenAiPreferences(flat: AiPreferencesRecord): {
+  training?: AiPrefCategoryRaw;
+  inference?: AiPrefCategoryRaw;
+  syntheticContent?: AiPrefCategoryRaw;
+  embedding?: AiPrefCategoryRaw;
+} {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(flat)) {
+    if (value) {
+      result[key] = { allow: value === 'allow' };
+    }
+  }
+  return result as typeof result;
 }
 
 /** Which categories the current user cares about for *reading* content. */
@@ -78,7 +128,9 @@ export async function fetchAiPreferences(
 
     if (!response.success) return null;
 
-    const record = response.data as AiPreferencesRecord;
+    // The API returns a nested structure; flatten it to our internal format.
+    const raw = response.data as AiPreferencesRecordRaw;
+    const record = flattenAiPreferences(raw);
 
     // Cache the result
     cache.set(did, {

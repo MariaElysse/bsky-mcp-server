@@ -20,8 +20,12 @@ import { registerPrompts } from './prompts.js';
 import { 
   batchCheckAiPreferences, 
   filterPostsByAiPreferences, 
+  flattenAiPreferences,
+  unflattenAiPreferences,
   READ_PREFERENCES,
-  type ReadPreference 
+  type ReadPreference,
+  type AiPreferencesRecordRaw,
+  type AiPreferencesRecord as FlatAiPreferencesRecord
 } from './ai-preferences.js';
 
 // Load environment variables
@@ -1493,20 +1497,12 @@ Description: ${resource.description}
 
 const AI_PREFS_COLLECTION = 'community.lexicon.preference.ai';
 const AI_PREFS_RKEY = 'self';
-const AI_PREF_CATEGORIES: Array<keyof AiPreferencesRecord> = [
+const AI_PREF_CATEGORIES: Array<keyof FlatAiPreferencesRecord> = [
   'training',
   'inference',
   'syntheticContent',
   'embedding',
 ];
-
-/** Shape of the community.lexicon.preference.ai record */
-interface AiPreferencesRecord {
-  training?: 'allow' | 'deny';
-  inference?: 'allow' | 'deny';
-  syntheticContent?: 'allow' | 'deny';
-  embedding?: 'allow' | 'deny';
-}
 
 /** Human-readable label for a preference category */
 const CATEGORY_LABELS: Record<string, string> = {
@@ -1571,7 +1567,9 @@ server.tool(
         );
       }
 
-      const record = response.data as AiPreferencesRecord;
+      // The API returns a nested structure; flatten it to our internal format.
+      const rawRecord = response.data as AiPreferencesRecordRaw;
+      const record = flattenAiPreferences(rawRecord);
 
       // Build a human-readable summary
       let output = `AI Preferences for ${did}:\n\n`;
@@ -1615,7 +1613,7 @@ server.tool(
       const rkey = AI_PREFS_RKEY;
 
       // First, read the existing record to preserve other categories
-      let existingRecord: AiPreferencesRecord = {};
+      let existingRaw: AiPreferencesRecordRaw = {};
       try {
         const getResponse = await currentAgent.com.atproto.repo.getRecord({
           repo: did,
@@ -1623,31 +1621,35 @@ server.tool(
           rkey,
         });
         if (getResponse.success) {
-          existingRecord = getResponse.data as AiPreferencesRecord;
+          existingRaw = getResponse.data as AiPreferencesRecordRaw;
         }
       } catch {
         // No existing record — that's fine, we'll create one
       }
 
-      // Merge the new value into the existing preferences
-      const updatedRecord: AiPreferencesRecord = {
-        ...existingRecord,
-        [category]: value,
-      };
+      // Flatten to internal format, merge the new value, then unflatten back to nested API format
+      const flatExisting = flattenAiPreferences(existingRaw);
+      const flatUpdated: Record<string, string> = { ...flatExisting };
+      flatUpdated[category] = value;
 
-      // Write back via putRecord
+      const nestedRecord = unflattenAiPreferences(flatUpdated as any);
+
+      // Write back via putRecord in the nested API format
       await currentAgent.com.atproto.repo.putRecord({
         repo: did,
         collection,
         rkey,
-        record: updatedRecord as any,
+        record: { ...nestedRecord } as any,
       });
 
       const label = CATEGORY_LABELS[category] ?? category;
       return mcpSuccessResponse(
         `Updated ${label} preference to "${value}".\n\nCurrent AI preferences:\n` +
           AI_PREF_CATEGORIES
-            .map((c) => `- ${CATEGORY_LABELS[c]}: ${updatedRecord[c] ?? 'unset'}`)
+            .map((c) => {
+              const val = flatUpdated[c];
+              return `- ${CATEGORY_LABELS[c]}: ${val ?? 'unset'}`;
+            })
             .join('\n')
       );
     } catch (error) {
