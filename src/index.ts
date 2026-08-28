@@ -20,6 +20,8 @@ import { registerPrompts } from './prompts.js';
 import { 
   batchCheckAiPreferences, 
   filterPostsByAiPreferences, 
+  getDidsFromThread,
+  filterThreadByAiPreferences,
   flattenAiPreferences,
   unflattenAiPreferences,
   READ_PREFERENCES,
@@ -419,11 +421,21 @@ server.tool(
         return mcpErrorResponse("Failed to fetch post thread.");
       }
 
-      // Enforce AI preferences: filter out content from users who deny inference/training
-      const threadData = formatPostThread(response.data.thread);
-      
-      // Note: get-post-thread is for a specific requested post, so we show it regardless.
-      // However, we still filter replies from denied authors by re-processing the thread.
+      // Enforce AI preferences: collect all DIDs from the thread, batch-check them,
+      // then filter out denied authors' posts (keeping only the explicitly requested root post).
+      const dids = getDidsFromThread(response.data.thread);
+      const allowedMap = await batchCheckAiPreferences(agent, dids);
+      const filteredThread = filterThreadByAiPreferences(
+        response.data.thread,
+        allowedMap,
+        true // root is always kept (explicitly requested)
+      );
+
+      if (!filteredThread || !filteredThread.post) {
+        return mcpSuccessResponse("No posts available in this thread after applying your AI preferences.");
+      }
+
+      const threadData = formatPostThread(filteredThread);
       return mcpSuccessResponse(threadData);
     } catch (error) {
       return mcpErrorResponse(`Error fetching post thread: ${error instanceof Error ? error.message : String(error)}`);

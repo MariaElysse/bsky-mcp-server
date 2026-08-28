@@ -248,3 +248,101 @@ export function filterPostsByAiPreferences(
 
   return { filtered, skippedCount: skipped };
 }
+
+// ---------------------------------------------------------------------------
+// Thread helpers — extract DIDs and filter threadViewPost trees
+// ---------------------------------------------------------------------------
+
+/**
+ * Recursively collect all author DIDs from a Bluesky getPostThread response.
+ */
+export function getDidsFromThread(thread: any): string[] {
+  const dids: string[] = [];
+  if (!thread) return dids;
+
+  // Collect DID from this node's post
+  const post = thread.post;
+  if (post?.author?.did) {
+    dids.push(post.author.did);
+  }
+
+  // Recurse into parent chain
+  if (thread.parent) {
+    dids.push(...getDidsFromThread(thread.parent));
+  }
+
+  // Recurse into replies
+  if (Array.isArray(thread.replies)) {
+    for (const reply of thread.replies) {
+      dids.push(...getDidsFromThread(reply));
+    }
+  }
+
+  return dids;
+}
+
+/**
+ * Recursively filter a threadViewPost tree, removing nodes whose author is denied.
+ * If the root post itself is denied it is still kept (it was explicitly requested).
+ */
+export function filterThreadByAiPreferences(
+  thread: any,
+  allowedDids: Map<string, boolean>,
+  isRoot: boolean = true
+): any | null {
+  if (!thread) return null;
+
+  const post = thread.post;
+  if (!post?.author?.did) return thread; // keep malformed nodes as-is
+
+  const authorDid = post.author.did;
+  const allowed = allowedDids.get(authorDid);
+
+  // If not yet checked (undefined), allow it — will be fetched next time
+  if (allowed === undefined) {
+    // Still recurse into children even though we're allowing this node
+    return filterThreadChildren(thread, allowedDids, isRoot);
+  }
+
+  // Denied author: skip unless this is the explicitly requested root post
+  if (!isRoot && allowed === false) {
+    return null;
+  }
+
+  // Allowed (or root): keep and recurse into children
+  return filterThreadChildren(thread, allowedDids, false);
+}
+
+/**
+ * Internal helper that recurses into parent/replies of a kept node.
+ */
+function filterThreadChildren(
+  thread: any,
+  allowedDids: Map<string, boolean>,
+  isRoot: boolean
+): any {
+  const result = { ...thread };
+
+  // Filter parent chain
+  if (result.parent) {
+    const filteredParent = filterThreadByAiPreferences(result.parent, allowedDids, false);
+    result.parent = filteredParent || undefined;
+    if (!result.parent) delete result.parent;
+  }
+
+  // Filter replies array
+  if (Array.isArray(result.replies)) {
+    const filteredReplies: any[] = [];
+    for (const reply of result.replies) {
+      const filtered = filterThreadByAiPreferences(reply, allowedDids, false);
+      if (filtered !== null && filtered !== undefined) {
+        // Also recurse into this reply's own replies
+        const deepFiltered = filterThreadChildren(filtered, allowedDids, false);
+        filteredReplies.push(deepFiltered);
+      }
+    }
+    result.replies = filteredReplies;
+  }
+
+  return result;
+}
