@@ -128,8 +128,8 @@ export async function fetchAiPreferences(
 
     if (!response.success) return null;
 
-    // The API returns a nested structure; flatten it to our internal format.
-    const raw = response.data as AiPreferencesRecordRaw;
+    // @atproto/api getRecord returns { uri, cid, value: {...} }. Extract the actual record.
+    const raw = (response.data as any).value as AiPreferencesRecordRaw;
     const record = flattenAiPreferences(raw);
 
     // Cache the result
