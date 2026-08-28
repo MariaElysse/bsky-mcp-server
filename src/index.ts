@@ -1567,8 +1567,9 @@ server.tool(
         );
       }
 
-      // The API returns a nested structure; flatten it to our internal format.
-      const rawRecord = response.data as AiPreferencesRecordRaw;
+      // @atproto/api getRecord returns { uri, cid, value: { ...actual data... } }.
+      // Extract the actual record before flattening.
+      const rawRecord = (response.data as any).value as AiPreferencesRecordRaw;
       const record = flattenAiPreferences(rawRecord);
 
       // Build a human-readable summary
@@ -1621,7 +1622,8 @@ server.tool(
           rkey,
         });
         if (getResponse.success) {
-          existingRaw = getResponse.data as AiPreferencesRecordRaw;
+          // @atproto/api getRecord returns { uri, cid, value: {...} }. Extract the actual record.
+          existingRaw = (getResponse.data as any).value as AiPreferencesRecordRaw;
         }
       } catch {
         // No existing record — that's fine, we'll create one
