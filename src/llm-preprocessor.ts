@@ -503,11 +503,7 @@ function formatThreadViewRecursive(
 
   // Handle tombstones in recursive thread output
   if (threadView && typeof threadView === 'object' && '__aiPrefExcluded' in threadView) {
-    const originalItem = threadView.originalItem;
-    const post = originalItem?.post;
-    const authorHandle = post?.author?.handle || 'unknown';
-    const uri = post?.uri || '';
-    return `${indent}<excluded_post reason="ai_preferences" author_handle="${escapeXml(authorHandle)}" uri="${escapeXml(uri)}">This post is hidden because the author has disabled AI inference/training in their Bluesky preferences.</excluded_post>`;
+    return formatTombstone(threadView, indent);
   }
 
   if (!threadView || threadView.$type !== 'app.bsky.feed.defs#threadViewPost') {
@@ -740,11 +736,7 @@ function processFilteredThreadViewChain(postChain: any[], indentLevel: number): 
   try {
     // Handle tombstones in chain
     if (rootPost && typeof rootPost === 'object' && '__aiPrefExcluded' in rootPost) {
-      const originalItem = rootPost.originalItem;
-      const post = originalItem?.post;
-      const authorHandle = post?.author?.handle || 'unknown';
-      const uri = post?.uri || '';
-      output += `${indent}<excluded_post reason="ai_preferences" author_handle="${escapeXml(authorHandle)}" uri="${escapeXml(uri)}">This post is hidden because the author has disabled AI inference/training in their Bluesky preferences.</excluded_post>\n`;
+      output += formatTombstone(rootPost, indent) + '\n';
 
       // Still try to process remaining chain items
       if (postChain.length > 1) {
@@ -893,11 +885,7 @@ function processFilteredThreadViewChain(postChain: any[], indentLevel: number): 
         for (const reply of validReplies) {
           // Check if this is a tombstone or normal post
           if (reply && typeof reply === 'object' && '__aiPrefExcluded' in reply) {
-            const originalItem = reply.originalItem;
-            const p = originalItem?.post;
-            const ah = p?.author?.handle || 'unknown';
-            const ur = p?.uri || '';
-            output += `${indent}    <excluded_post reason="ai_preferences" author_handle="${escapeXml(ah)}" uri="${escapeXml(ur)}">This post is hidden because the author has disabled AI inference/training in their Bluesky preferences.</excluded_post>\n`;
+            output += formatTombstone(reply, indent + '    ') + '\n';
           } else if (reply.post) {
             output += processFilteredThreadViewPost(reply, indentLevel + 2);
           }
@@ -1072,11 +1060,7 @@ function processFilteredThreadViewPost(threadViewPost: any, indentLevel: number)
       ? threadViewPost.replies.map((r: any) => {
           if (r && typeof r === 'object' && '__aiPrefExcluded' in r) {
             // Tombstone in replies
-            const originalItem = r.originalItem;
-            const p = originalItem?.post;
-            const ah = p?.author?.handle || 'unknown';
-            const ur = p?.uri || '';
-            return `${indent}    <excluded_post reason="ai_preferences" author_handle="${escapeXml(ah)}" uri="${escapeXml(ur)}">This post is hidden because the author has disabled AI inference/training in their Bluesky preferences.</excluded_post>`;
+            return formatTombstone(r, indent + '    ');
           } else if (r.post) {
             return processFilteredThreadViewPost(r, indentLevel + 2);
           }

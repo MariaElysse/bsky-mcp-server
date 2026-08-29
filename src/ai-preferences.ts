@@ -243,10 +243,16 @@ export interface AiPreferenceTombstone {
  * Excluded posts are replaced with tombstone placeholders so that feed order,
  * thread hierarchy, and item count remain consistent — the post is not silently dropped.
  * Returns { filtered: [...], skippedCount: number }.
+ *
+ * @param posts - Array of FeedViewPost-like items to filter.
+ * @param allowedDids - Map from DID → true (allowed) or false (denied).
+ * @param deniedRecords - Optional map from DID → full AiPreferencesRecord. When provided,
+ *   tombstones include the specific categories that caused denial in `deniedCategories`.
  */
 export function filterPostsByAiPreferences(
   posts: any[],
-  allowedDids: Map<string, boolean>
+  allowedDids: Map<string, boolean>,
+  deniedRecords?: Map<string, AiPreferencesRecord>
 ): { filtered: any[]; skippedCount: number } {
   let skipped = 0;
   const filtered = posts.map((item) => {
@@ -256,13 +262,25 @@ export function filterPostsByAiPreferences(
     const allowed = allowedDids.get(post.author.did);
     if (allowed === false) {
       skipped++;
+      // Populate deniedCategories from the full record when available
+      let categories: string[] | undefined;
+      if (deniedRecords?.has(post.author.did)) {
+        const record = deniedRecords.get(post.author.did)!;
+        for (const cat of READ_PREFERENCES) {
+          if (record[cat] === 'deny') {
+            categories ??= [];
+            categories.push(cat);
+          }
+        }
+      }
       return {
         __aiPrefExcluded: true,
         originalItem: item,
-        deniedCategories: [], // will be populated by caller if needed
+        deniedCategories: categories,
       } as AiPreferenceTombstone;
     }
-    return item; // undefined means not cached yet — allow (will be fetched next time)
+    return item; // DID not in allowedDids map: either never batch-checked or cache-missed.
+    // Treated as "allow" for privacy-first fallback (never block content on missing data).
   });
 
   return { filtered, skippedCount: skipped };

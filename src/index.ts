@@ -19,6 +19,7 @@ import { registerResources, resourcesList } from './resources.js';
 import { registerPrompts } from './prompts.js';
 import { 
   batchCheckAiPreferences, 
+  fetchAiPreferences,
   filterPostsByAiPreferences, 
   flattenAiPreferences,
   unflattenAiPreferences,
@@ -132,40 +133,31 @@ async function filterPostsByAiPrefs(
   // Batch-check preferences
   const allowedMap = await batchCheckAiPreferences(agent, Array.from(didSet));
 
-  // Replace denied posts with tombstone placeholders (preserves order/position)
-  const processed = posts.map((item) => {
-    if (item && typeof item === 'object' && '__aiPrefExcluded' in item) return item;
-    const post = item?.post;
-    if (!post || !post.author?.did) return item;
-
-    const allowed = allowedMap.get(post.author.did);
-    if (allowed === false) {
-      return {
-        __aiPrefExcluded: true,
-        originalItem: item,
-        deniedCategories: [],
-      };
+  // Build deniedRecords map for populated deniedCategories on tombstones
+  const deniedRecords = new Map<string, any>();
+  for (const [did, allowed] of allowedMap) {
+    if (!allowed) {
+      // Re-fetch the full record to get denial categories
+      const record = await fetchAiPreferences(agent, did);
+      if (record) deniedRecords.set(did, record);
     }
-    return item;
-  });
+  }
 
-  // Count tombstones vs real posts
-  const skippedCount = processed.filter(
-    (item) => item && typeof item === 'object' && '__aiPrefExcluded' in item
-  ).length;
+  // Use utility function — replaces denied posts with tombstones preserving order
+  const { filtered, skippedCount } = filterPostsByAiPreferences(posts, allowedMap, deniedRecords);
 
-  if (processed.length === 0) {
+  if (filtered.length === 0) {
     return { text: `No ${entityType} available.`, count: 0 };
   }
 
   // Format results — tombstones are rendered as <excluded_post> elements by preprocessPosts
-  const formattedPosts = preprocessPosts(processed);
-  let summaryText = formatSummaryText(processed.length - skippedCount, entityType);
+  const formattedPosts = preprocessPosts(filtered);
+  let summaryText = formatSummaryText(filtered.length - skippedCount, entityType);
   if (skippedCount > 0) {
     summaryText += ` [${skippedCount} post(s) hidden due to your AI preferences]`;
   }
 
-  return { text: `${summaryText}\n\n${formattedPosts}`, count: processed.length - skippedCount };
+  return { text: `${summaryText}\n\n${formattedPosts}`, count: filtered.length - skippedCount };
 }
 
 server.tool(
