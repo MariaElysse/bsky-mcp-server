@@ -226,7 +226,22 @@ export async function batchCheckAiPreferences(
 }
 
 /**
+ * Shape of a tombstone placeholder inserted when a post is excluded by AI preferences.
+ * Preserves the item's position in the array so thread/feed ordering stays consistent.
+ */
+export interface AiPreferenceTombstone {
+  /** Always false — marks this as an excluded post */
+  __aiPrefExcluded: true;
+  /** The original FeedViewPost-like item (preserved for metadata) */
+  originalItem: any;
+  /** Which preference categories caused the denial */
+  deniedCategories?: string[];
+}
+
+/**
  * Filter an array of FeedViewPost-like items by AI preferences.
+ * Excluded posts are replaced with tombstone placeholders so that feed order,
+ * thread hierarchy, and item count remain consistent — the post is not silently dropped.
  * Returns { filtered: [...], skippedCount: number }.
  */
 export function filterPostsByAiPreferences(
@@ -234,16 +249,20 @@ export function filterPostsByAiPreferences(
   allowedDids: Map<string, boolean>
 ): { filtered: any[]; skippedCount: number } {
   let skipped = 0;
-  const filtered = posts.filter((item) => {
+  const filtered = posts.map((item) => {
     const post = item?.post;
-    if (!post || !post.author?.did) return true; // keep items without author info
+    if (!post || !post.author?.did) return item; // keep items without author info
 
     const allowed = allowedDids.get(post.author.did);
     if (allowed === false) {
       skipped++;
-      return false;
+      return {
+        __aiPrefExcluded: true,
+        originalItem: item,
+        deniedCategories: [], // will be populated by caller if needed
+      } as AiPreferenceTombstone;
     }
-    return true; // undefined means not cached yet — allow (will be fetched next time)
+    return item; // undefined means not cached yet — allow (will be fetched next time)
   });
 
   return { filtered, skippedCount: skipped };
