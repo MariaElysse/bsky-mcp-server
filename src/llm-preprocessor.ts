@@ -343,27 +343,93 @@ function formatThread(feedItems: AppBskyFeedDefs.FeedViewPost[], rootUri: string
 }
 
 /**
- * Preprocess multiple posts into the XML format defined in the spec
+ * Check if an item is a tombstone placeholder for an AI-preference-excluded post.
+ */
+function isAiPrefTombstone(item: any): boolean {
+  return item && typeof item === 'object' && '__aiPrefExcluded' in item;
+}
+
+/**
+ * Format a single tombstone placeholder into XML.
+ */
+function formatTombstone(tombstone: any, indent: string = ''): string {
+  const originalItem = tombstone.originalItem;
+  const post = originalItem?.post;
+  const authorHandle = post?.author?.handle || 'unknown';
+  const uri = post?.uri || '';
+
+  return `${indent}<excluded_post reason="ai_preferences" author_handle="${escapeXml(authorHandle)}" uri="${escapeXml(uri)}">This post is hidden because the author has disabled AI inference/training in their Bluesky preferences.</excluded_post>`;
+}
+
+/**
+ * Preprocess multiple posts into the XML format defined in the spec.
+ * Excluded posts (marked with __aiPrefExcluded) are rendered as tombstone placeholders
+ * so feed order and thread structure remain consistent.
  */
 export function preprocessPosts(feedItems: AppBskyFeedDefs.FeedViewPost[]): string {
   let result = '<posts>\n';
-  
-  // Group into threads and standalone posts
-  const { threads, standalone } = groupThreads(feedItems);
-  
-  // Format threads
+
+  // Separate normal items from tombstones for grouping, but track positions
+  const normalItems: any[] = [];
+  const tombstoneIndices: number[] = [];
+
+  feedItems.forEach((item, idx) => {
+    if (isAiPrefTombstone(item)) {
+      tombstoneIndices.push(idx);
+    } else {
+      normalItems.push({ item, originalIndex: idx });
+    }
+  });
+
+  // Group normal items into threads and standalone posts
+  const { threads, standalone } = groupThreads(normalItems.map(x => x.item));
+
+  // Format threads (with their original indices)
+  const threadItems: Array<{ item: any; index: number }> = [];
   threads.forEach((items, rootUri) => {
-    result += formatThread(items, rootUri) + '\n\n';
+    items.forEach(item => {
+      const origIdx = feedItems.indexOf(item);
+      if (origIdx >= 0) threadItems.push({ item, index: origIdx });
+    });
   });
-  
-  // Format standalone posts
-  standalone.forEach(item => {
-    result += formatPost(item) + '\n\n';
+
+  // Build ordered output by merging normal posts and tombstones at their original positions
+  const allEntries: Array<{ type: 'post' | 'tombstone'; content: string; orderIndex: number }> = [];
+
+  // Add thread posts with their original indices
+  threadItems.forEach(({ item, index }) => {
+    let content = formatThread([item], Object.keys(threads).find(uri => threads.get(uri)?.includes(item)) || '');
+    if (content) allEntries.push({ type: 'post', content, orderIndex: index });
   });
-  
+
+  // Add standalone posts with their original indices
+  standalone.forEach((item, i) => {
+    const origIdx = feedItems.indexOf(item);
+    let content = formatPost(item);
+    if (content) allEntries.push({ type: 'post', content, orderIndex: origIdx >= 0 ? origIdx : i });
+  });
+
+  // Add tombstones at their original positions
+  tombstoneIndices.forEach(idx => {
+    const tombstone = feedItems[idx];
+    let content = formatTombstone(tombstone);
+    if (content) allEntries.push({ type: 'tombstone', content, orderIndex: idx });
+  });
+
+  // Sort by original index to preserve ordering
+  allEntries.sort((a, b) => a.orderIndex - b.orderIndex);
+
+  // Build final output
+  const parts = allEntries.map(e => e.content);
+  result += parts.join('\n\n');
+
   // Remove trailing newlines and add closing tag
-  result = result.trimEnd() + '\n</posts>';
-  
+  if (result.trim()) {
+    result = result.trimEnd() + '\n</posts>';
+  } else {
+    result += '</posts>';
+  }
+
   return result;
 }
 
@@ -376,6 +442,650 @@ export function preprocessPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
 export function formatFeed(feed: { items: AppBskyFeedDefs.FeedViewPost[] }): string {
   return preprocessPosts(feed.items);
 }
+
+/**
+ * Recursively filter a thread view by AI preferences.
+ * Replaces excluded posts with tombstone placeholders (except the requested post).
+ * Returns the filtered threadViewPost or a tombstone wrapper.
+ */
+export function filterThreadByAiPreferences(
+  threadView: any,
+  allowedDids: Map<string, boolean>,
+  isRequestedPost = false
+): any {
+  if (!threadView || typeof threadView !== 'object') return threadView;
+
+  const post = threadView.post;
+  if (!post) return threadView;
+
+  // Always allow the requested post regardless of preferences
+  if (isRequestedPost) {
+    // Still recursively filter its replies and children
+    if (threadView.replies && Array.isArray(threadView.replies)) {
+      threadView.replies = threadView.replies.map((r: any) =>
+        filterThreadByAiPreferences(r, allowedDids, false)
+      );
+    }
+    return threadView;
+  }
+
+  // Check if this post's author is denied
+  const did = post.author?.did;
+  if (did && allowedDids.get(did) === false) {
+    // Replace with tombstone — preserve URI and metadata for consistency
+    return {
+      __aiPrefExcluded: true,
+      originalItem: threadView,
+      deniedCategories: [],
+    };
+  }
+
+  // Allowed — recursively filter replies
+  if (threadView.replies && Array.isArray(threadView.replies)) {
+    threadView.replies = threadView.replies.map((r: any) =>
+      filterThreadByAiPreferences(r, allowedDids, false)
+    );
+  }
+
+  return threadView;
+}
+
+/**
+ * Recursively format a thread view (recursive structure from getPostThread).
+ * Handles both normal posts and tombstone placeholders.
+ */
+function formatThreadViewRecursive(
+  threadView: any,
+  indentLevel: number,
+  isRequestedPost = false
+): string {
+  const indent = '  '.repeat(indentLevel);
+
+  // Handle tombstones in recursive thread output
+  if (threadView && typeof threadView === 'object' && '__aiPrefExcluded' in threadView) {
+    return formatTombstone(threadView, indent);
+  }
+
+  if (!threadView || threadView.$type !== 'app.bsky.feed.defs#threadViewPost') {
+    return '';
+  }
+
+  const post = threadView.post;
+  if (!post) return '';
+
+  let output = '';
+
+  try {
+    // Determine post type (standalone, reply, quote)
+    const record = post.record as AppBskyFeedPost.Record;
+    if (!record) {
+      console.error('Record missing for post:', post.uri);
+      return '';
+    }
+
+    const isReply = record.reply != null;
+    const isQuote = post.embed?.$type === 'app.bsky.embed.record#view';
+
+    let postType = 'standalone';
+    if (isReply) postType = 'reply';
+    if (isQuote) {
+      postType = isReply ? 'reply,quote' : 'quote';
+    }
+
+    // Check for required fields
+    if (!post.uri) {
+      console.error('URI missing for post');
+      return '';
+    }
+
+    if (!post.author || !post.author.handle) {
+      console.error('Author or handle missing for post:', post.uri);
+      return '';
+    }
+
+    // Start building post tag attributes
+    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="https://bsky.app/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
+    postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
+    postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
+
+    // Add reply_to attribute if it's a reply
+    if (isReply && record.reply && record.reply.parent && record.reply.parent.uri) {
+      postAttrs += ` reply_to="${record.reply.parent.uri}"`;
+    }
+
+    // If this is the originally requested post, mark it
+    if (isRequestedPost) {
+      postAttrs += ` requested="true"`;
+    }
+
+    // Format the post opening tag with all attributes
+    output += `${indent}<post ${postAttrs}>\n`;
+
+    // Add content, using facetsToMarkdown to properly handle links, mentions, hashtags
+    output += `${indent}  <content>\n${indent}    ${facetsToMarkdown(record.text || '', record.facets)}\n${indent}  </content>\n`;
+
+    // Add quoted post if present
+    if (isQuote && post.embed && post.embed.record) {
+      const quoted = post.embed.record;
+      if (quoted.uri && quoted.author && quoted.author.handle) {
+        output += `${indent}  <quoted_post uri="${quoted.uri}" `;
+        output += `bsky_url="https://bsky.app/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
+        output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
+        output += `author_handle="${quoted.author.handle}" `;
+        output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;
+
+        // Use facetsToMarkdown for quoted content as well
+        output += `${indent}    <content>\n${indent}      ${facetsToMarkdown((quoted.value && quoted.value.text) || '', (quoted.value && quoted.value.facets) || [])}\n${indent}    </content>\n`;
+
+        // Add engagement metrics for quoted post
+        if (quoted.likeCount || quoted.repostCount || quoted.replyCount) {
+          output += `${indent}    Engagement: ${quoted.likeCount || 0} likes, ${quoted.repostCount || 0} reposts, ${quoted.replyCount || 0} replies`;
+          if (quoted.quoteCount) output += `, ${quoted.quoteCount} quotes`;
+          output += '\n';
+        }
+
+        output += `${indent}  </quoted_post>\n`;
+      }
+    }
+
+    // Add embeds if present
+    if (post.embed && post.embed.$type !== 'app.bsky.embed.record#view') {
+      // Handle images
+      if (post.embed.$type === 'app.bsky.embed.images#view') {
+        const images = post.embed.images || [];
+        for (const image of images) {
+          if (!image) continue;
+          output += `${indent}  <embed type="image">\n`;
+          if (image.alt) {
+            output += `${indent}    Image description: "${escapeXml(image.alt)}"\n`;
+          }
+          if (image.fullsize || image.thumb) {
+            output += `${indent}    URL: ${image.fullsize || image.thumb}\n`;
+          }
+          output += `${indent}  </embed>\n`;
+        }
+      }
+      // Handle external links
+      else if (post.embed.$type === 'app.bsky.embed.external#view' && post.embed.external) {
+        output += `${indent}  <embed type="link">\n`;
+        if (post.embed.external.title) {
+          output += `${indent}    Title: "${escapeXml(post.embed.external.title)}"\n`;
+        }
+        if (post.embed.external.uri) {
+          output += `${indent}    URL: ${post.embed.external.uri}\n`;
+        }
+        if (post.embed.external.description) {
+          output += `${indent}    Description: "${escapeXml(post.embed.external.description)}"\n`;
+        }
+        if (post.embed.external.thumb) {
+          output += `${indent}    Thumbnail: ${post.embed.external.thumb}\n`;
+        }
+        output += `${indent}  </embed>\n`;
+      }
+      // Handle videos
+      else if (post.embed.$type === 'app.bsky.embed.video#view' && post.embed.video) {
+        output += `${indent}  <embed type="video">\n`;
+        if (post.embed.video.alt) {
+          output += `${indent}    Video description: ${escapeXml(post.embed.video.alt)}\n`;
+        }
+        if (post.embed.video.thumb) {
+          output += `${indent}    Thumbnail: ${post.embed.video.thumb}\n`;
+        }
+        if (post.embed.video.url) {
+          output += `${indent}    URL: ${post.embed.video.url}\n`;
+        }
+        output += `${indent}  </embed>\n`;
+      }
+    }
+
+    // Add engagement metrics
+    if (post.likeCount || post.repostCount || post.replyCount) {
+      output += `${indent}  Engagement: ${post.likeCount || 0} likes, ${post.repostCount || 0} reposts, ${post.replyCount || 0} replies`;
+      if (post.quoteCount) output += `, ${post.quoteCount} quotes`;
+      output += '\n';
+    }
+
+    // Process replies recursively if present — filter by AI prefs first
+    const filteredReplies = threadView.replies
+      ? threadView.replies.map((r: any) => formatThreadViewRecursive(r, indentLevel + 2, false))
+      : [];
+    const validReplies = filteredReplies.filter(Boolean);
+
+    if (validReplies.length > 0) {
+      output += `${indent}  <replies>\n`;
+      for (const reply of validReplies) {
+        output += reply;
+      }
+      output += `${indent}  </replies>\n`;
+    }
+
+    output += `${indent}</post>\n`;
+  } catch (error) {
+    console.error(`Error processing post: ${error instanceof Error ? error.message : String(error)}`);
+    return ''; // Skip this post if there's an error
+  }
+
+  return output;
+}
+
+/**
+ * Format a post thread according to our format spec, with AI preference filtering.
+ * Excluded posts (except the requested one) are replaced with tombstone placeholders.
+ */
+export function formatPostThreadWithAiPrefs(
+  threadView: any,
+  allowedDids: Map<string, boolean>
+): string {
+  // Start building the posts XML container
+  let output = "<posts>\n";
+
+  // Check if this post has parents that we need to process first
+  if (threadView.parent) {
+    // We need to find the root of the conversation by traversing parent references
+    let currentThreadView = threadView;
+    const parentChain: any[] = [];
+
+    // Collect all parents in the chain (including the original post)
+    parentChain.push(threadView);
+    while (currentThreadView.parent) {
+      parentChain.unshift(currentThreadView.parent); // Add parents to the front to maintain hierarchy
+      currentThreadView = currentThreadView.parent;
+    }
+
+    // Mark the originally requested post
+    threadView.isRequestedPost = true;
+
+    // Filter each post in the chain by AI preferences (requested post is always allowed)
+    const filteredChain = parentChain.map((pv: any, idx: number) => {
+      if (idx === 0 && pv.isRequestedPost) {
+        return filterThreadByAiPreferences(pv, allowedDids, true);
+      }
+      // Parent posts are also always shown for context
+      return filterThreadByAiPreferences(pv, allowedDids, false);
+    });
+
+    // Process the filtered chain
+    output += processFilteredThreadViewChain(filteredChain, 0);
+  } else {
+    // No parents, just process the given thread
+    // Mark this as the requested post and always allow it
+    threadView.isRequestedPost = true;
+    const filtered = filterThreadByAiPreferences(threadView, allowedDids, true);
+    output += formatThreadViewRecursive(filtered, 0, true);
+  }
+
+  // Close the posts container
+  output += "</posts>";
+
+  return output;
+}
+
+/**
+ * Process a chain of (possibly filtered) thread view posts with parent-child relationships.
+ */
+function processFilteredThreadViewChain(postChain: any[], indentLevel: number): string {
+  if (!postChain || !postChain.length) {
+    return '';
+  }
+
+  // Start with the root post
+  const rootPost = postChain[0];
+  const indent = '  '.repeat(indentLevel);
+  let output = '';
+
+  try {
+    // Handle tombstones in chain
+    if (rootPost && typeof rootPost === 'object' && '__aiPrefExcluded' in rootPost) {
+      output += formatTombstone(rootPost, indent) + '\n';
+
+      // Still try to process remaining chain items
+      if (postChain.length > 1) {
+        output += processFilteredThreadViewChain(postChain.slice(1), indentLevel);
+      }
+      return output;
+    }
+
+    const post = rootPost.post;
+    if (!post) return '';
+
+    // Determine post type (standalone, reply, quote)
+    const record = post.record as AppBskyFeedPost.Record;
+    if (!record) {
+      console.error('Record missing for post:', post.uri);
+      return '';
+    }
+
+    const isReply = record.reply != null;
+    const isQuote = post.embed?.$type === 'app.bsky.embed.record#view';
+
+    let postType = 'standalone';
+    if (isReply) postType = 'reply';
+    if (isQuote) {
+      postType = isReply ? 'reply,quote' : 'quote';
+    }
+
+    // Check for required fields
+    if (!post.uri) {
+      console.error('URI missing for post');
+      return '';
+    }
+
+    if (!post.author || !post.author.handle) {
+      console.error('Author or handle missing for post:', post.uri);
+      return '';
+    }
+
+    // Start building post tag attributes
+    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="https://bsky.app/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
+    postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
+    postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
+
+    // Add reply_to attribute if it's a reply
+    if (isReply && record.reply && record.reply.parent && record.reply.parent.uri) {
+      postAttrs += ` reply_to="${record.reply.parent.uri}"`;
+    }
+
+    // If this is the originally requested post, mark it
+    if (rootPost.isRequestedPost) {
+      postAttrs += ` requested="true"`;
+    }
+
+    // Format the post opening tag with all attributes
+    output += `${indent}<post ${postAttrs}>\n`;
+
+    // Add content, using facetsToMarkdown to properly handle links, mentions, hashtags
+    output += `${indent}  <content>\n${indent}    ${facetsToMarkdown(record.text || '', record.facets)}\n${indent}  </content>\n`;
+
+    // Add quoted post if present
+    if (isQuote && post.embed && post.embed.record) {
+      const quoted = post.embed.record;
+      if (quoted.uri && quoted.author && quoted.author.handle) {
+        output += `${indent}  <quoted_post uri="${quoted.uri}" `;
+        output += `bsky_url="https://bsky.app/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
+        output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
+        output += `author_handle="${quoted.author.handle}" `;
+        output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;
+
+        // Use facetsToMarkdown for quoted content as well
+        output += `${indent}    <content>\n${indent}      ${facetsToMarkdown((quoted.value && quoted.value.text) || '', (quoted.value && quoted.value.facets) || [])}\n${indent}    </content>\n`;
+
+        // Add engagement metrics for quoted post
+        if (quoted.likeCount || quoted.repostCount || quoted.replyCount) {
+          output += `${indent}    Engagement: ${quoted.likeCount || 0} likes, ${quoted.repostCount || 0} reposts, ${quoted.replyCount || 0} replies`;
+          if (quoted.quoteCount) output += `, ${quoted.quoteCount} quotes`;
+          output += '\n';
+        }
+
+        output += `${indent}  </quoted_post>\n`;
+      }
+    }
+
+    // Add embeds if present
+    if (post.embed && post.embed.$type !== 'app.bsky.embed.record#view') {
+      // Handle images
+      if (post.embed.$type === 'app.bsky.embed.images#view') {
+        const images = post.embed.images || [];
+        for (const image of images) {
+          if (!image) continue;
+          output += `${indent}  <embed type="image">\n`;
+          if (image.alt) {
+            output += `${indent}    Image description: "${escapeXml(image.alt)}"\n`;
+          }
+          if (image.fullsize || image.thumb) {
+            output += `${indent}    URL: ${image.fullsize || image.thumb}\n`;
+          }
+          output += `${indent}  </embed>\n`;
+        }
+      }
+      // Handle external links
+      else if (post.embed.$type === 'app.bsky.embed.external#view' && post.embed.external) {
+        output += `${indent}  <embed type="link">\n`;
+        if (post.embed.external.title) {
+          output += `${indent}    Title: "${escapeXml(post.embed.external.title)}"\n`;
+        }
+        if (post.embed.external.uri) {
+          output += `${indent}    URL: ${post.embed.external.uri}\n`;
+        }
+        if (post.embed.external.description) {
+          output += `${indent}    Description: "${escapeXml(post.embed.external.description)}"\n`;
+        }
+        if (post.embed.external.thumb) {
+          output += `${indent}    Thumbnail: ${post.embed.external.thumb}\n`;
+        }
+        output += `${indent}  </embed>\n`;
+      }
+      // Handle videos
+      else if (post.embed.$type === 'app.bsky.embed.video#view' && post.embed.video) {
+        output += `${indent}  <embed type="video">\n`;
+        if (post.embed.video.alt) {
+          output += `${indent}    Video description: ${escapeXml(post.embed.video.alt)}\n`;
+        }
+        if (post.embed.video.thumb) {
+          output += `${indent}    Thumbnail: ${post.embed.video.thumb}\n`;
+        }
+        if (post.embed.video.url) {
+          output += `${indent}    URL: ${post.embed.video.url}\n`;
+        }
+        output += `${indent}  </embed>\n`;
+      }
+    }
+
+    // Add engagement metrics
+    if (post.likeCount || post.repostCount || post.replyCount) {
+      output += `${indent}  Engagement: ${post.likeCount || 0} likes, ${post.repostCount || 0} reposts, ${post.replyCount || 0} replies`;
+      if (post.quoteCount) output += `, ${post.quoteCount} quotes`;
+      output += '\n';
+    }
+
+    // Handle replies: first check normal replies array (already filtered by AI prefs)
+    if (rootPost.replies && Array.isArray(rootPost.replies) && rootPost.replies.length > 0) {
+      const validReplies = rootPost.replies.filter((r: any) => r !== null && r !== undefined);
+      if (validReplies.length > 0) {
+        output += `${indent}  <replies>\n`;
+        for (const reply of validReplies) {
+          // Check if this is a tombstone or normal post
+          if (reply && typeof reply === 'object' && '__aiPrefExcluded' in reply) {
+            output += formatTombstone(reply, indent + '    ') + '\n';
+          } else if (reply.post) {
+            output += processFilteredThreadViewPost(reply, indentLevel + 2);
+          }
+        }
+        output += `${indent}  </replies>\n`;
+      }
+    }
+
+    // If this is not the last post in the chain, add the next post as a reply
+    else if (postChain.length > 1) {
+      const remainingChain = postChain.slice(1);
+      output += `${indent}  <replies>\n`;
+      output += processFilteredThreadViewChain(remainingChain, indentLevel + 2);
+      output += `${indent}  </replies>\n`;
+    }
+
+    output += `${indent}</post>\n`;
+  } catch (error) {
+    console.error(`Error processing post chain: ${error instanceof Error ? error.message : String(error)}`);
+    return ''; // Skip this post if there's an error
+  }
+
+  return output;
+}
+
+/**
+ * Process a single filtered thread view post and all of its replies.
+ */
+function processFilteredThreadViewPost(threadViewPost: any, indentLevel: number): string {
+  if (!threadViewPost || threadViewPost.$type !== 'app.bsky.feed.defs#threadViewPost') {
+    return '';
+  }
+
+  const post = threadViewPost.post;
+  if (!post) return '';
+
+  const indent = '  '.repeat(indentLevel);
+  let output = '';
+
+  try {
+    // Determine post type (standalone, reply, quote)
+    const record = post.record as AppBskyFeedPost.Record;
+    if (!record) {
+      console.error('Record missing for post:', post.uri);
+      return '';
+    }
+
+    const isReply = record.reply != null;
+    const isQuote = post.embed?.$type === 'app.bsky.embed.record#view';
+
+    let postType = 'standalone';
+    if (isReply) postType = 'reply';
+    if (isQuote) {
+      postType = isReply ? 'reply,quote' : 'quote';
+    }
+
+    // Check for required fields
+    if (!post.uri) {
+      console.error('URI missing for post');
+      return '';
+    }
+
+    if (!post.author || !post.author.handle) {
+      console.error('Author or handle missing for post:', post.uri);
+      return '';
+    }
+
+    // Start building post tag attributes
+    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="https://bsky.app/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
+    postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
+    postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
+
+    // Add reply_to attribute if it's a reply
+    if (isReply && record.reply && record.reply.parent && record.reply.parent.uri) {
+      postAttrs += ` reply_to="${record.reply.parent.uri}"`;
+    }
+
+    // If this is the originally requested post, mark it
+    if (threadViewPost.isRequestedPost) {
+      postAttrs += ` requested="true"`;
+    }
+
+    // Format the post opening tag with all attributes
+    output += `${indent}<post ${postAttrs}>\n`;
+
+    // Add content, using facetsToMarkdown to properly handle links, mentions, hashtags
+    output += `${indent}  <content>\n${indent}    ${facetsToMarkdown(record.text || '', record.facets)}\n${indent}  </content>\n`;
+
+    // Add quoted post if present
+    if (isQuote && post.embed && post.embed.record) {
+      const quoted = post.embed.record;
+      if (quoted.uri && quoted.author && quoted.author.handle) {
+        output += `${indent}  <quoted_post uri="${quoted.uri}" `;
+        output += `bsky_url="https://bsky.app/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
+        output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
+        output += `author_handle="${quoted.author.handle}" `;
+        output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;
+
+        // Use facetsToMarkdown for quoted content as well
+        output += `${indent}    <content>\n${indent}      ${facetsToMarkdown((quoted.value && quoted.value.text) || '', (quoted.value && quoted.value.facets) || [])}\n${indent}    </content>\n`;
+
+        // Add engagement metrics for quoted post
+        if (quoted.likeCount || quoted.repostCount || quoted.replyCount) {
+          output += `${indent}    Engagement: ${quoted.likeCount || 0} likes, ${quoted.repostCount || 0} reposts, ${quoted.replyCount || 0} replies`;
+          if (quoted.quoteCount) output += `, ${quoted.quoteCount} quotes`;
+          output += '\n';
+        }
+
+        output += `${indent}  </quoted_post>\n`;
+      }
+    }
+
+    // Add embeds if present
+    if (post.embed && post.embed.$type !== 'app.bsky.embed.record#view') {
+      // Handle images
+      if (post.embed.$type === 'app.bsky.embed.images#view') {
+        const images = post.embed.images || [];
+        for (const image of images) {
+          if (!image) continue;
+          output += `${indent}  <embed type="image">\n`;
+          if (image.alt) {
+            output += `${indent}    Image description: "${escapeXml(image.alt)}"\n`;
+          }
+          if (image.fullsize || image.thumb) {
+            output += `${indent}    URL: ${image.fullsize || image.thumb}\n`;
+          }
+          output += `${indent}  </embed>\n`;
+        }
+      }
+      // Handle external links
+      else if (post.embed.$type === 'app.bsky.embed.external#view' && post.embed.external) {
+        output += `${indent}  <embed type="link">\n`;
+        if (post.embed.external.title) {
+          output += `${indent}    Title: "${escapeXml(post.embed.external.title)}"\n`;
+        }
+        if (post.embed.external.uri) {
+          output += `${indent}    URL: ${post.embed.external.uri}\n`;
+        }
+        if (post.embed.external.description) {
+          output += `${indent}    Description: "${escapeXml(post.embed.external.description)}"\n`;
+        }
+        if (post.embed.external.thumb) {
+          output += `${indent}    Thumbnail: ${post.embed.external.thumb}\n`;
+        }
+        output += `${indent}  </embed>\n`;
+      }
+      // Handle videos
+      else if (post.embed.$type === 'app.bsky.embed.video#view' && post.embed.video) {
+        output += `${indent}  <embed type="video">\n`;
+        if (post.embed.video.alt) {
+          output += `${indent}    Video description: ${escapeXml(post.embed.video.alt)}\n`;
+        }
+        if (post.embed.video.thumb) {
+          output += `${indent}    Thumbnail: ${post.embed.video.thumb}\n`;
+        }
+        if (post.embed.video.url) {
+          output += `${indent}    URL: ${post.embed.video.url}\n`;
+        }
+        output += `${indent}  </embed>\n`;
+      }
+    }
+
+    // Add engagement metrics
+    if (post.likeCount || post.repostCount || post.replyCount) {
+      output += `${indent}  Engagement: ${post.likeCount || 0} likes, ${post.repostCount || 0} reposts, ${post.replyCount || 0} replies`;
+      if (post.quoteCount) output += `, ${post.quoteCount} quotes`;
+      output += '\n';
+    }
+
+    // Process replies recursively if present — filter by AI prefs first
+    const filteredReplies = threadViewPost.replies
+      ? threadViewPost.replies.map((r: any) => {
+          if (r && typeof r === 'object' && '__aiPrefExcluded' in r) {
+            // Tombstone in replies
+            return formatTombstone(r, indent + '    ');
+          } else if (r.post) {
+            return processFilteredThreadViewPost(r, indentLevel + 2);
+          }
+          return '';
+        })
+      : [];
+    const validReplies = filteredReplies.filter(Boolean);
+
+    if (validReplies.length > 0) {
+      output += `${indent}  <replies>\n`;
+      for (const reply of validReplies) {
+        output += reply;
+      }
+      output += `${indent}  </replies>\n`;
+    }
+
+    output += `${indent}</post>\n`;
+  } catch (error) {
+    console.error(`Error processing post: ${error instanceof Error ? error.message : String(error)}`);
+    return ''; // Skip this post if there's an error
+  }
+
+  return output;
+}
+
 
 /**
  * Format a post thread according to our format spec
