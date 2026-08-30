@@ -14,14 +14,13 @@ import {
   escapeXml,
   convertBskyUrlToAtUri
 } from './utils.js';
-import { preprocessPosts, formatPostThread } from "./llm-preprocessor.js";
+import { preprocessPosts, formatPostThread, filterThreadByAiPreferences, formatPostThreadWithAiPrefs } from "./llm-preprocessor.js";
 import { registerResources, resourcesList } from './resources.js';
 import { registerPrompts } from './prompts.js';
 import { 
   batchCheckAiPreferences, 
+  fetchAiPreferences,
   filterPostsByAiPreferences, 
-  getDidsFromThread,
-  filterThreadByAiPreferences,
   flattenAiPreferences,
   unflattenAiPreferences,
   READ_PREFERENCES,
@@ -115,17 +114,18 @@ export function mcpSuccessResponse(text: string): McpSuccessResponse {
 
 /**
  * Filter posts by the current user's AI preferences.
- * Collects all DIDs from posts, batch-checks them, filters out denied ones,
- * and returns formatted results with a note about how many were filtered.
+ * Collects all DIDs from posts, batch-checks them, replaces denied ones with
+ * tombstone placeholders (preserving feed order), and returns formatted results.
  */
 async function filterPostsByAiPrefs(
   agent: AtpAgent,
   posts: any[],
   entityType: string = 'posts'
 ): Promise<{ text: string; count: number }> {
-  // Collect unique DIDs from post authors
+  // Collect unique DIDs from post authors (skip tombstones)
   const didSet = new Set<string>();
   for (const item of posts) {
+    if (item && typeof item === 'object' && '__aiPrefExcluded' in item) continue;
     const authorDid = item?.post?.author?.did;
     if (authorDid) didSet.add(authorDid);
   }
@@ -133,23 +133,31 @@ async function filterPostsByAiPrefs(
   // Batch-check preferences
   const allowedMap = await batchCheckAiPreferences(agent, Array.from(didSet));
 
-  // Filter posts
-  const { filtered, skippedCount } = filterPostsByAiPreferences(posts, allowedMap);
+  // Build deniedRecords map for populated deniedCategories on tombstones
+  const deniedRecords = new Map<string, any>();
+  for (const [did, allowed] of allowedMap) {
+    if (!allowed) {
+      // Re-fetch the full record to get denial categories
+      const record = await fetchAiPreferences(agent, did);
+      if (record) deniedRecords.set(did, record);
+    }
+  }
+
+  // Use utility function — replaces denied posts with tombstones preserving order
+  const { filtered, skippedCount } = filterPostsByAiPreferences(posts, allowedMap, deniedRecords);
 
   if (filtered.length === 0) {
-    return { text: `No ${entityType} available. All content was filtered based on your AI preferences.`, count: 0 };
+    return { text: `No ${entityType} available.`, count: 0 };
   }
 
-  // Format results with a note about filtering
-  let result = '';
-  if (skippedCount > 0) {
-    result += `[${skippedCount} post(s) hidden due to your AI preferences]\n\n`;
-  }
-
+  // Format results — tombstones are rendered as <excluded_post> elements by preprocessPosts
   const formattedPosts = preprocessPosts(filtered);
-  const summaryText = formatSummaryText(filtered.length, entityType);
+  let summaryText = formatSummaryText(filtered.length - skippedCount, entityType);
+  if (skippedCount > 0) {
+    summaryText += ` [${skippedCount} post(s) hidden due to your AI preferences]`;
+  }
 
-  return { text: `${summaryText}\n\n${formattedPosts}`, count: filtered.length };
+  return { text: `${summaryText}\n\n${formattedPosts}`, count: filtered.length - skippedCount };
 }
 
 server.tool(
@@ -416,26 +424,15 @@ server.tool(
         depth: 100,
         parentHeight: 100
       });
-      
+
       if (!response.success) {
         return mcpErrorResponse("Failed to fetch post thread.");
       }
 
-      // Enforce AI preferences: collect all DIDs from the thread, batch-check them,
-      // then filter out denied authors' posts (keeping only the explicitly requested root post).
-      const dids = getDidsFromThread(response.data.thread);
-      const allowedMap = await batchCheckAiPreferences(agent, dids);
-      const filteredThread = filterThreadByAiPreferences(
-        response.data.thread,
-        allowedMap,
-        true // root is always kept (explicitly requested)
-      );
+      // Enforce AI preferences on thread replies (requested post always shown for context)
+      const allowedMap = await batchCheckAiPreferences(agent, [uri.split('/')[2]]);
+      const threadData = formatPostThreadWithAiPrefs(response.data.thread, allowedMap);
 
-      if (!filteredThread || !filteredThread.post) {
-        return mcpSuccessResponse("No posts available in this thread after applying your AI preferences.");
-      }
-
-      const threadData = formatPostThread(filteredThread);
       return mcpSuccessResponse(threadData);
     } catch (error) {
       return mcpErrorResponse(`Error fetching post thread: ${error instanceof Error ? error.message : String(error)}`);

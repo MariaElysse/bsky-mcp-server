@@ -226,123 +226,128 @@ export async function batchCheckAiPreferences(
 }
 
 /**
+ * Shape of a tombstone placeholder inserted when a post is excluded by AI preferences.
+ * Preserves the item's position in the array so thread/feed ordering stays consistent.
+ */
+export interface AiPreferenceTombstone {
+  /** Always false — marks this as an excluded post */
+  __aiPrefExcluded: true;
+  /** The original FeedViewPost-like item (preserved for metadata) */
+  originalItem: any;
+  /** Which preference categories caused the denial */
+  deniedCategories?: string[];
+}
+
+/**
  * Filter an array of FeedViewPost-like items by AI preferences.
+ * Excluded posts are replaced with tombstone placeholders so that feed order,
+ * thread hierarchy, and item count remain consistent — the post is not silently dropped.
  * Returns { filtered: [...], skippedCount: number }.
+ *
+ * @param posts - Array of FeedViewPost-like items to filter.
+ * @param allowedDids - Map from DID → true (allowed) or false (denied).
+ * @param deniedRecords - Optional map from DID → full AiPreferencesRecord. When provided,
+ *   tombstones include the specific categories that caused denial in `deniedCategories`.
  */
 export function filterPostsByAiPreferences(
   posts: any[],
-  allowedDids: Map<string, boolean>
+  allowedDids: Map<string, boolean>,
+  deniedRecords?: Map<string, AiPreferencesRecord>
 ): { filtered: any[]; skippedCount: number } {
   let skipped = 0;
-  const filtered = posts.filter((item) => {
+  const filtered = posts.map((item) => {
     const post = item?.post;
-    if (!post || !post.author?.did) return true; // keep items without author info
+    if (!post || !post.author?.did) return item; // keep items without author info
 
     const allowed = allowedDids.get(post.author.did);
     if (allowed === false) {
       skipped++;
-      return false;
+      // Populate deniedCategories from the full record when available
+      let categories: string[] | undefined;
+      if (deniedRecords?.has(post.author.did)) {
+        const record = deniedRecords.get(post.author.did)!;
+        for (const cat of READ_PREFERENCES) {
+          if (record[cat] === 'deny') {
+            categories ??= [];
+            categories.push(cat);
+          }
+        }
+      }
+      return {
+        __aiPrefExcluded: true,
+        originalItem: item,
+        deniedCategories: categories,
+      } as AiPreferenceTombstone;
     }
-    return true; // undefined means not cached yet — allow (will be fetched next time)
+    return item; // DID not in allowedDids map: either never batch-checked or cache-missed.
+    // Treated as "allow" for privacy-first fallback (never block content on missing data).
   });
 
   return { filtered, skippedCount: skipped };
 }
 
-// ---------------------------------------------------------------------------
-// Thread helpers — extract DIDs and filter threadViewPost trees
-// ---------------------------------------------------------------------------
-
-/**
- * Recursively collect all author DIDs from a Bluesky getPostThread response.
- */
-export function getDidsFromThread(thread: any): string[] {
+// Re-export thread-related helpers from llm-preprocessor for test compatibility.
+// These are logically part of the AI preferences system (thread filtering).
+export function getDidsFromThread(threadView: any): string[] {
+  if (!threadView || typeof threadView !== 'object') return [];
   const dids: string[] = [];
-  if (!thread) return dids;
-
-  // Collect DID from this node's post
-  const post = thread.post;
-  if (post?.author?.did) {
-    dids.push(post.author.did);
+  const post = threadView.post;
+  if (post?.author?.did) dids.push(post.author.did);
+  if (threadView.parent) {
+    dids.push(...getDidsFromThread(threadView.parent));
   }
-
-  // Recurse into parent chain
-  if (thread.parent) {
-    dids.push(...getDidsFromThread(thread.parent));
-  }
-
-  // Recurse into replies
-  if (Array.isArray(thread.replies)) {
-    for (const reply of thread.replies) {
+  if (threadView.replies && Array.isArray(threadView.replies)) {
+    for (const reply of threadView.replies) {
       dids.push(...getDidsFromThread(reply));
     }
   }
-
   return dids;
 }
 
-/**
- * Recursively filter a threadViewPost tree, removing nodes whose author is denied.
- * If the root post itself is denied it is still kept (it was explicitly requested).
- */
 export function filterThreadByAiPreferences(
-  thread: any,
+  threadView: any,
   allowedDids: Map<string, boolean>,
-  isRoot: boolean = true
-): any | null {
-  if (!thread) return null;
-
-  const post = thread.post;
-  if (!post?.author?.did) return thread; // keep malformed nodes as-is
-
-  const authorDid = post.author.did;
-  const allowed = allowedDids.get(authorDid);
-
-  // If not yet checked (undefined), allow it — will be fetched next time
-  if (allowed === undefined) {
-    // Still recurse into children even though we're allowing this node
-    return filterThreadChildren(thread, allowedDids, isRoot);
-  }
-
-  // Denied author: skip unless this is the explicitly requested root post
-  if (!isRoot && allowed === false) {
-    return null;
-  }
-
-  // Allowed (or root): keep and recurse into children
-  return filterThreadChildren(thread, allowedDids, false);
-}
-
-/**
- * Internal helper that recurses into parent/replies of a kept node.
- */
-function filterThreadChildren(
-  thread: any,
-  allowedDids: Map<string, boolean>,
-  isRoot: boolean
+  isRequestedPost = false
 ): any {
-  const result = { ...thread };
+  if (!threadView || typeof threadView !== 'object') return threadView;
+  const post = threadView.post;
+  if (!post) return threadView;
 
-  // Filter parent chain
-  if (result.parent) {
-    const filteredParent = filterThreadByAiPreferences(result.parent, allowedDids, false);
-    result.parent = filteredParent || undefined;
-    if (!result.parent) delete result.parent;
-  }
-
-  // Filter replies array
-  if (Array.isArray(result.replies)) {
-    const filteredReplies: any[] = [];
-    for (const reply of result.replies) {
-      const filtered = filterThreadByAiPreferences(reply, allowedDids, false);
-      if (filtered !== null && filtered !== undefined) {
-        // Also recurse into this reply's own replies
-        const deepFiltered = filterThreadChildren(filtered, allowedDids, false);
-        filteredReplies.push(deepFiltered);
-      }
+  // Always allow the requested post regardless of preferences
+  if (isRequestedPost) {
+    // Still recursively filter its parent and replies
+    if (threadView.parent) {
+      const filteredParent = filterThreadByAiPreferences(threadView.parent, allowedDids, false);
+      threadView.parent = filteredParent || undefined;
     }
-    result.replies = filteredReplies;
+    if (threadView.replies && Array.isArray(threadView.replies)) {
+      threadView.replies = threadView.replies.map((r: any) =>
+        filterThreadByAiPreferences(r, allowedDids, false)
+      );
+      // Filter out null entries (removed denied posts)
+      threadView.replies = threadView.replies.filter((r: any) => r !== null);
+    }
+    return threadView;
   }
 
-  return result;
+  // Check if this post's author is denied
+  const did = post.author?.did;
+  if (did && allowedDids.get(did) === false) {
+    return null; // Remove denied posts from threads
+  }
+
+  // Allowed — recursively filter parent and replies
+  if (threadView.parent) {
+    const filteredParent = filterThreadByAiPreferences(threadView.parent, allowedDids, false);
+    threadView.parent = filteredParent || undefined;
+  }
+  if (threadView.replies && Array.isArray(threadView.replies)) {
+    threadView.replies = threadView.replies.map((r: any) =>
+      filterThreadByAiPreferences(r, allowedDids, false)
+    );
+    // Filter out null entries (removed denied posts)
+    threadView.replies = threadView.replies.filter((r: any) => r !== null);
+  }
+
+  return threadView;
 }

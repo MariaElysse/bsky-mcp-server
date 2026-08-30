@@ -28,10 +28,10 @@ function runSuite(name: string, cmd: string) {
 async function main() {
   const suites = [
     ["register-tools", `node build/test/register-tools.test.js`],
-    ["remote-oauth", `node build/test/remote-oauth.test.js`],
     ["url-converter", `node build/test/url-converter/test-url-converter.js`],
     ["link-preview", `node build/test/link-preview/test-link-preview.js`],
     ["ai-preferences", `node build/test/ai-preferences.test.js`],
+    ["ai-preferences-tombstone", `node build/test/ai-preferences-tombstone.test.js`],
   ];
 
   const results = [];

@@ -164,8 +164,12 @@ async function testFilterRemoveDenied() {
     ["did:plc:c", true],
   ]);
   const result = aiPrefs.filterPostsByAiPreferences(posts, allowedMap);
-  assert.equal(result.filtered.length, 2);
+  // Denied posts are replaced with tombstones, not removed — total count stays the same
+  assert.equal(result.filtered.length, 3);
   assert.equal(result.skippedCount, 1);
+  // Verify the tombstone is in position 1
+  const tombstone = result.filtered[1];
+  assert.ok(tombstone.__aiPrefExcluded === true, "denied post should be a tombstone");
 }
 
 async function testFilterAllDenied() {
@@ -175,8 +179,13 @@ async function testFilterAllDenied() {
   ];
   const allowedMap = new Map([["did:plc:a", false], ["did:plc:b", false]]);
   const result = aiPrefs.filterPostsByAiPreferences(posts, allowedMap);
-  assert.equal(result.filtered.length, 0);
+  // All posts become tombstones — array is not empty
+  assert.equal(result.filtered.length, 2);
   assert.equal(result.skippedCount, 2);
+  // Verify all are tombstones
+  for (const item of result.filtered) {
+    assert.ok(item.__aiPrefExcluded === true, "all items should be tombstones");
+  }
 }
 
 async function testFilterEmptyInput() {
@@ -415,15 +424,11 @@ async function testIntegrationGetPostThreadEnforcesPrefs() {
   );
   const src = fs.readFileSync(indexPath, "utf-8");
 
-  // get-post-thread should use getDidsFromThread and filterThreadByAiPreferences
+  // get-post-thread should use formatPostThreadWithAiPrefs or filterThreadByAiPreferences
   assert.ok(
-    src.includes("getDidsFromThread"),
-    "get-post-thread should extract DIDs from thread"
-  );
-  assert.ok(
-    src.includes("filterThreadByAiPreferences") ||
-      src.includes("batchCheckAiPreferences"),
-    "get-post-thread should filter denied authors"
+    src.includes("formatPostThreadWithAiPrefs") ||
+      src.includes("filterThreadByAiPreferences"),
+    "get-post-thread should enforce AI preferences"
   );
 }
 
