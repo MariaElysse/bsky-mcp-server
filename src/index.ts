@@ -15,6 +15,7 @@ import {
   convertBskyUrlToAtUri
 } from './utils.js';
 import { preprocessPosts, formatPostThread, filterThreadByAiPreferences, formatPostThreadWithAiPrefs } from "./llm-preprocessor.js";
+import { fetchThreadContext, formatPermissionSummary } from './thread-context.js';
 import { registerResources, resourcesList } from './resources.js';
 import { registerPrompts } from './prompts.js';
 import { 
@@ -404,7 +405,7 @@ server.tool(
 
 server.tool(
   "get-post-thread",
-  "Get a full conversation thread for a specific post, showing replies and context",
+  "Get a full conversation thread for a specific post, showing replies and context. Also checks AI preferences of all participants and gates AI reply generation when any participant has opted out.",
   {
     uri: z.string().describe("URI of the post to fetch the thread for (e.g., at://did:plc:abcdef/app.bsky.feed.post/123)"),
   },
@@ -419,21 +420,28 @@ server.tool(
         return mcpErrorResponse("Invalid post URI format. Expected format: at://did:plc:abcdef/app.bsky.feed.post/123");
       }
 
-      const response = await agent.app.bsky.feed.getPostThread({
-        uri,
-        depth: 100,
-        parentHeight: 100
-      });
+      // Fetch the full thread context with AI preference checks on all participants.
+      let threadContext;
+      try {
+        threadContext = await fetchThreadContext(agent, uri);
+      } catch (error) {
+        return mcpErrorResponse(`Failed to fetch thread context: ${error instanceof Error ? error.message : String(error)}`);
+      }
 
-      if (!response.success) {
-        return mcpErrorResponse("Failed to fetch post thread.");
+      // Report permission summary.
+      const permSummary = formatPermissionSummary(threadContext.permissionSummary);
+
+      if (!threadContext.canReplyWithAi) {
+        return mcpSuccessResponse(
+          `Thread fetched successfully.\n\n${permSummary}\n\n⚠ AI reply generation is BLOCKED: some participants have opted out of inference/training.`
+        );
       }
 
       // Enforce AI preferences on thread replies (requested post always shown for context)
       const allowedMap = await batchCheckAiPreferences(agent, [uri.split('/')[2]]);
-      const threadData = formatPostThreadWithAiPrefs(response.data.thread, allowedMap);
+      const threadData = formatPostThreadWithAiPrefs(threadContext.threadView, allowedMap);
 
-      return mcpSuccessResponse(threadData);
+      return mcpSuccessResponse(`${permSummary}\n\n${threadData}`);
     } catch (error) {
       return mcpErrorResponse(`Error fetching post thread: ${error instanceof Error ? error.message : String(error)}`);
     }

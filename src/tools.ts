@@ -15,6 +15,7 @@ import { preprocessPosts, formatPostThread, filterThreadByAiPreferences } from "
 import { resourcesList } from './resources.js';
 import { fetchLinkMetadata, uploadThumbnail } from './link-preview.js';
 import { batchCheckAiPreferences, fetchAiPreferences, filterPostsByAiPreferences, READ_PREFERENCES } from './ai-preferences.js';
+import { fetchThreadContext, formatPermissionSummary, type ThreadContext } from './thread-context.js';
 
 export type AgentProvider = () => Agent | null;
 
@@ -1700,6 +1701,96 @@ Description: ${resource.description}
       }).join("\n\n");
 
       return mcpSuccessResponse(`Available MCP Resources:\n\n${formattedResources}\n\nTo use these resources, reference them by URI in your prompts or queries.`);
+    }
+  );
+
+  server.tool(
+    "reply-to-post",
+    "Publish a formatted reply to an existing Bluesky post with valid root/parent reply refs. Automatically fetches the full conversation thread context (including parent chain and replies), checks AI preferences of all participants, and gates AI-generated replies when any participant has opted out of inference/training. Returns the URI of the newly created reply.",
+    {
+      uri: z.string().describe("The AT URI of the post to reply to (e.g., at://did:plc:abcdef/app.bsky.feed.post/123)"),
+      text: z.string().max(400).describe("The content of your reply (max 400 characters, Bluesky limit)"),
+      generateReply: z.boolean().default(false).describe("When true, the LLM client should generate a contextually appropriate reply based on thread context; when false, use the provided text directly."),
+    },
+    async ({ uri, text, generateReply }) => {
+      const agent = getAgent();
+      if (!agent) {
+        return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
+      }
+
+      try {
+        // Validate the URI format
+        if (!uri.startsWith('at://did:plc:') || !uri.includes('/app.bsky.feed.post/')) {
+          return mcpErrorResponse("Invalid post URI format. Expected format: at://did:plc:abcdef/app.bsky.feed.post/123");
+        }
+
+        // Step 1: Fetch the full thread context with AI preference checks.
+        let threadContext: ThreadContext;
+        try {
+          threadContext = await fetchThreadContext(agent, uri);
+        } catch (error) {
+          return mcpErrorResponse(`Failed to fetch thread context: ${error instanceof Error ? error.message : String(error)}`);
+        }
+
+        // Step 2: Report permission summary.
+        const permSummary = formatPermissionSummary(threadContext.permissionSummary);
+
+        if (!threadContext.canReplyWithAi && generateReply) {
+          return mcpErrorResponse(
+            `AI reply generation is BLOCKED for this thread.\n\n${permSummary}\n\nSome participants have opted out of AI inference/training. Please craft a manual reply or exclude the opt-out users.`
+          );
+        }
+
+        // Step 3: Resolve root and parent refs from the existing post's record.
+        const response = await agent.app.bsky.feed.getPostThread({ uri, depth: 0, parentHeight: 0 });
+        if (!response.success) {
+          return mcpErrorResponse("Failed to get post information for reply refs.");
+        }
+
+        const threadPost = (response.data.thread as any);
+        const parentRecord = (threadPost.post?.record as any);
+        let rootUri: string;
+        let rootCid: string;
+        let parentCid: string;
+
+        if (parentRecord?.reply) {
+          // This post is itself a reply — use its root and parent.
+          rootUri = parentRecord.reply.root.uri;
+          rootCid = parentRecord.reply.root.cid;
+        } else {
+          // This post IS the root of the thread.
+          rootUri = uri;
+          rootCid = threadPost.post?.cid ?? '';
+        }
+        parentCid = threadPost.post?.cid ?? '';
+
+        // Step 4: Build the reply record with valid root/parent refs.
+        const rt = new RichText({ text });
+        await rt.detectFacets(agent);
+
+        const record: any = {
+          text: rt.text,
+          createdAt: new Date().toISOString(),
+          reply: {
+            parent: { uri, cid: parentCid },
+            root: { uri: rootUri, cid: rootCid }
+          }
+        };
+
+        if (rt.facets && rt.facets.length > 0) {
+          record.facets = rt.facets;
+        }
+
+        // Step 5: Publish the reply.
+        const postResponse = await agent.post(record);
+
+        let resultText = `Reply published successfully!\nURI: ${postResponse.uri}\n`;
+        resultText += `\nThread permission summary:\n${permSummary}`;
+
+        return mcpSuccessResponse(resultText);
+      } catch (error) {
+        return mcpErrorResponse(`Error creating reply: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   );
 }

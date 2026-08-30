@@ -10,6 +10,7 @@ const EXPECTED_TOOLS = [
   "get-timeline-posts",
   "get-notifications",
   "create-post",
+  "reply-to-post",
   "get-profile",
   "search-posts",
   "get-post-thread",

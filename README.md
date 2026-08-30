@@ -33,7 +33,8 @@ Here's the current list of tools provided:
 
 ### Post & Thread Tools
 - **create-post**: Publishes a new post to Bluesky. Supports replies, link previews (auto-detected or specified), and automatic facet detection (mentions, hashtags).
-- **get-post-thread**: Returns a full conversation thread for a specific post, showing all replies and context up to configurable depth/parent height.
+- **reply-to-post**: Publishes a formatted reply to an existing Bluesky post with valid root/parent reply refs. Automatically fetches the full conversation thread context, checks AI preferences of all participants, and gates AI-generated replies when any participant has opted out of inference/training.
+- **get-post-thread**: Returns a full conversation thread for a specific post, showing all replies and context up to configurable depth/parent height. Also checks AI preferences of all participants and gates AI reply generation when any participant has opted out.
 - **like-post**: Likes a post with a specific URI.
 - **unfollow-user**: Unfollows a specific user.
 
