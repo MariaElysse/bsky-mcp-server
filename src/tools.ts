@@ -11,11 +11,59 @@ import {
   mcpErrorResponse,
   mcpSuccessResponse,
 } from './utils.js';
-import { preprocessPosts, formatPostThread } from "./llm-preprocessor.js";
+import { preprocessPosts, formatPostThread, filterThreadByAiPreferences } from "./llm-preprocessor.js";
 import { resourcesList } from './resources.js';
 import { fetchLinkMetadata, uploadThumbnail } from './link-preview.js';
+import { batchCheckAiPreferences, fetchAiPreferences, filterPostsByAiPreferences, READ_PREFERENCES } from './ai-preferences.js';
 
 export type AgentProvider = () => Agent | null;
+
+/**
+ * Filter posts by the current user's AI preferences.
+ * Collects all DIDs from posts, batch-checks them, replaces denied ones with
+ * tombstone placeholders (preserving feed order), and returns formatted results.
+ */
+async function filterPostsByAiPrefs(
+  agent: any,
+  posts: any[],
+  entityType: string = 'posts'
+): Promise<{ text: string; count: number }> {
+  // Collect unique DIDs from post authors (skip tombstones)
+  const didSet = new Set<string>();
+  for (const item of posts) {
+    if (item && typeof item === 'object' && '__aiPrefExcluded' in item) continue;
+    const authorDid = item?.post?.author?.did;
+    if (authorDid) didSet.add(authorDid);
+  }
+
+  // Batch-check preferences — cast to any since Agent/AtpAgent types differ between index.ts and tools.ts
+  const allowedMap = await batchCheckAiPreferences(agent as any, Array.from(didSet));
+
+  // Build deniedRecords map for populated deniedCategories on tombstones
+  const deniedRecords = new Map<string, any>();
+  for (const [did, allowed] of allowedMap) {
+    if (!allowed) {
+      const record = await fetchAiPreferences(agent as any, did);
+      if (record) deniedRecords.set(did, record);
+    }
+  }
+
+  // Use utility function — replaces denied posts with tombstones preserving order
+  const { filtered, skippedCount } = filterPostsByAiPreferences(posts, allowedMap, deniedRecords);
+
+  if (filtered.length === 0) {
+    return { text: `No ${entityType} available.`, count: 0 };
+  }
+
+  // Format results — tombstones are rendered as <excluded_post> elements by preprocessPosts
+  const formattedPosts = preprocessPosts(filtered);
+  let summaryText = formatSummaryText(filtered.length - skippedCount, entityType);
+  if (skippedCount > 0) {
+    summaryText += ` [${skippedCount} post(s) hidden due to your AI preferences]`;
+  }
+
+  return { text: `${summaryText}\n\n${formattedPosts}`, count: filtered.length - skippedCount };
+}
 
 /**
  * Register all Bluesky MCP tools on the provided server.
@@ -133,12 +181,9 @@ export function registerTools(server: McpServer, getAgent: AgentProvider): void 
           return mcpSuccessResponse("Your timeline is empty.");
         }
 
-        // Format the posts
-        const timelineData = preprocessPosts(finalPosts);
-
-        const summaryText = formatSummaryText(finalPosts.length, "timeline");
-
-        return mcpSuccessResponse(`${summaryText}\n\n${timelineData}`);
+        // Enforce AI preferences: filter out content from users who deny inference/training
+        const result = await filterPostsByAiPrefs(agent, finalPosts, "timeline");
+        return mcpSuccessResponse(result.text);
 
       } catch (error) {
         return mcpErrorResponse(`Error fetching timeline: ${error instanceof Error ? error.message : String(error)}`);
@@ -403,13 +448,10 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
           reason: undefined
         }));
 
-        // Format the search results using preprocessPosts
-        const formattedPosts = preprocessPosts(feedViewPosts);
+        // Enforce AI preferences: filter out content from users who deny inference/training
+        const result = await filterPostsByAiPrefs(agent, feedViewPosts, "search results");
 
-        // Add summary information
-        const summaryText = formatSummaryText(posts.length, "search results");
-
-        return mcpSuccessResponse(`${summaryText}\n\n${formattedPosts}`);
+        return mcpSuccessResponse(result.text);
       } catch (error) {
         return mcpErrorResponse(`Error searching posts: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -444,8 +486,17 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
           return mcpErrorResponse("Failed to fetch post thread.");
         }
 
+        // Enforce AI preferences on thread replies (requested post always shown for context)
+        const rootDid = uri.split('/')[2];
+        const allowedMap = await batchCheckAiPreferences(agent as any, [rootDid]);
+        const filteredThread = filterThreadByAiPreferences(response.data.thread, allowedMap);
+
+        if (!filteredThread) {
+          return mcpSuccessResponse("No thread data available.");
+        }
+
         // Process the thread structure and format it according to POST_FORMAT_SPEC
-        const threadData = formatPostThread(response.data.thread);
+        const threadData = formatPostThread(filteredThread);
 
         return mcpSuccessResponse(threadData);
       } catch (error) {
@@ -639,13 +690,10 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
           return mcpSuccessResponse(`You haven't liked any posts.`);
         }
 
-        // Format the likes list using preprocessPosts
-        const formattedLikes = preprocessPosts(allLikes);
+        // Enforce AI preferences: filter out content from users who deny inference/training
+        const result = await filterPostsByAiPrefs(agent, allLikes, "liked posts");
 
-        // Create a summary
-        const summaryText = formatSummaryText(allLikes.length, "liked posts");
-
-        return mcpSuccessResponse(`${summaryText}\n\n${formattedLikes}`);
+        return mcpSuccessResponse(result.text);
 
       } catch (error) {
         return mcpErrorResponse(`Error fetching likes: ${error instanceof Error ? error.message : String(error)}`);
@@ -1093,13 +1141,10 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
           return mcpSuccessResponse(`No posts found in the feed: ${feed}`);
         }
 
-        // Format the posts
-        const formattedPosts = preprocessPosts(finalPosts);
+        // Enforce AI preferences: filter out content from users who deny inference/training
+        const result = await filterPostsByAiPrefs(agent, finalPosts, "feed");
 
-        // Add summary information
-        const summaryText = formatSummaryText(finalPosts.length, "feed");
-
-        return mcpSuccessResponse(`${summaryText}\n\n${formattedPosts}`);
+        return mcpSuccessResponse(result.text);
       } catch (error) {
         return mcpErrorResponse(`Error fetching posts: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -1202,13 +1247,10 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
           return mcpSuccessResponse(`No posts found from the list.`);
         }
 
-        // Format the posts
-        const formattedPosts = preprocessPosts(finalPosts);
+        // Enforce AI preferences: filter out content from users who deny inference/training
+        const result = await filterPostsByAiPrefs(agent, finalPosts, "list");
 
-        // Add summary information
-        const summaryText = formatSummaryText(finalPosts.length, "list");
-
-        return mcpSuccessResponse(`${summaryText}\n\n${formattedPosts}`);
+        return mcpSuccessResponse(result.text);
       } catch (error) {
         return mcpErrorResponse(`Error fetching list posts: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -1320,13 +1362,10 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
             return mcpSuccessResponse(`No posts found from @${user}.`);
           }
 
-          // Format the posts
-          const formattedPosts = preprocessPosts(finalPosts);
+          // Enforce AI preferences: filter out content from users who deny inference/training
+          const result = await filterPostsByAiPrefs(agent, finalPosts, "user");
 
-          // Add summary information
-          const summaryText = formatSummaryText(finalPosts.length, "user");
-
-          return mcpSuccessResponse(`${summaryText}\n\n${formattedPosts}`);
+          return mcpSuccessResponse(result.text);
         } catch (profileError) {
           return mcpErrorResponse(`Error retrieving user profile: ${profileError instanceof Error ? profileError.message : String(profileError)}`);
         }
