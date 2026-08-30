@@ -31,6 +31,7 @@ async function main() {
     ["remote-oauth", `node build/test/remote-oauth.test.js`],
     ["url-converter", `node build/test/url-converter/test-url-converter.js`],
     ["link-preview", `node build/test/link-preview/test-link-preview.js`],
+    ["ai-preferences-tombstone", `node build/test/ai-preferences-tombstone.test.js`],
   ];
 
   const results = [];
