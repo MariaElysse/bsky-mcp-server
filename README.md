@@ -25,6 +25,7 @@ Here's the current list of tools provided:
 - **get-timeline-posts**: Returns posts from the authenticated user's home timeline. Supports count-based and time-based fetching (e.g., "posts" or "hours").
 - **get-feed-posts**: Returns posts from a specified feed (custom user feed, algorithmic feed, etc.)
 - **get-notifications**: Fetches notifications from Bluesky, optionally filtered by type (reply, mention, like, repost, follow, quote).
+- **get-mention-context**: Fetches recent mentions of the authenticated user with full conversation thread context and AI preference filtering.
 
 ### Search Tools
 - **search-posts**: Searches for posts on Bluesky. Supports strict AND matching and operators: `from:`, `to:`, `mentions:`, `url:`, `lang:`, `has:images`, `has:video`, `has:link`. Sort by "top" or "latest".

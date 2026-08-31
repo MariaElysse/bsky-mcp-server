@@ -3,13 +3,15 @@
  * the agent was mentioned, with AI preference filtering.
  */
 
-import { AtpAgent } from '@atproto/api';
+import { formatPostThread } from './llm-preprocessor.js';
+import type { AtpAgent } from '@atproto/api';
 import {
   batchCheckAiPreferences,
   filterThreadByAiPreferences as aiPrefFilterThread,
   getDidsFromThread,
+  READ_PREFERENCES,
 } from './ai-preferences.js';
-import { formatPostThread } from './llm-preprocessor.js';
+import { formatPostThread, formatPostThreadWithAiPrefs, filterThreadByAiPreferences as aiPrefFilterThread } from './llm-preprocessor.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -19,12 +21,50 @@ import { formatPostThread } from './llm-preprocessor.js';
 export interface ThreadContextResult {
   /** The filtered thread view (may be null on error) */
   thread: any | null;
+  /** The raw unfiltered thread view */
+  rawThread?: any | null;
   /** Unique DIDs of all participants in the thread */
   participants: string[];
   /** The URI that was mentioned / requested */
   mentionedPostUri: string;
   /** Human-readable summary for LLM consumption */
   formattedText: string;
+  /** Map of DID to AI preference permission boolean */
+  allowedMap?: Map<string, boolean>;
+}
+
+/** A single participant extracted from a thread view node. */
+export interface ThreadParticipant {
+  /** Bluesky DID of the author */
+  did: string;
+  /** Handle for display */
+  handle: string;
+  /** Display name */
+  displayName?: string;
+  /** Whether this user has opted out of AI inference/training */
+  aiPrefDenied: boolean;
+  /** Which categories caused denial (empty if allowed) */
+  deniedCategories: string[];
+}
+
+/** Summary of a thread's participants and permission status. */
+export interface ThreadPermissionSummary {
+  /** All unique participants in the thread */
+  participants: ThreadParticipant[];
+  /** Whether any participant has opted out of AI inference/training */
+  hasOptOuts: boolean;
+  /** List of DIDs that denied inference or training */
+  optOutDids: string[];
+}
+
+/** Full context returned by fetchThreadContext. */
+export interface ThreadContext {
+  /** The raw thread view from the API (may contain tombstones) */
+  threadView: any;
+  /** Summary of participants and their AI preference status */
+  permissionSummary: ThreadPermissionSummary;
+  /** Whether it is safe to generate an AI reply based on opt-out signals */
+  canReplyWithAi: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,9 +165,10 @@ export async function fetchThreadContext(
     }
 
     const threadView = response.data.thread;
+    const rawThread = JSON.parse(JSON.stringify(threadView));
 
     // Extract all participant DIDs from the raw (unfiltered) thread
-    const participants = extractAllParticipants(threadView);
+    const participants = extractAllParticipants(rawThread);
 
     // Batch-check AI preferences for all unique participants
     let allowedDids: Map<string, boolean> = new Map();
@@ -143,21 +184,23 @@ export async function fetchThreadContext(
     }
 
     // Apply AI preference filtering to the thread
-    const filteredThread = aiPrefFilterThread(threadView, allowedDids, true);
+    const filteredThread = aiPrefFilterThread(JSON.parse(JSON.stringify(rawThread)), allowedDids, false);
 
     // Format using llm-preprocessor conventions
     let formattedText = '';
     try {
-      formattedText = formatPostThread(filteredThread);
+      formattedText = formatPostThreadWithAiPrefs(rawThread, allowedDids, false);
     } catch (_err) {
       formattedText = '<posts>\n  <error>Failed to format thread</error>\n</posts>';
     }
 
     return {
       thread: filteredThread,
+      rawThread,
       participants,
       mentionedPostUri: postUri,
       formattedText,
+      allowedMap: allowedDids,
     };
   } catch (_err) {
     // Graceful fallback on error
@@ -173,9 +216,11 @@ export async function fetchThreadContext(
 function buildEmptyResult(mentionedPostUri: string): ThreadContextResult {
   return {
     thread: null,
+    rawThread: null,
     participants: [],
     mentionedPostUri,
     formattedText: '<posts>\n  <error>No thread data available</error>\n</posts>',
+    allowedMap: new Map(),
   };
 }
 
@@ -244,32 +289,58 @@ export async function fetchThreadContextWithMeta(
 // ---------------------------------------------------------------------------
 
 /**
- * Formats a summary of AI preference permissions for the given allowed map.
+ * Formats a summary of AI preference permissions for the given allowed map or summary.
  */
-export function formatPermissionSummary(allowedMap: Map<string, boolean>): string {
-  const denied: string[] = [];
-  const allowed: string[] = [];
+export function formatPermissionSummary(allowedMapOrSummary: Map<string, boolean> | ThreadPermissionSummary): string {
+  if (allowedMapOrSummary instanceof Map) {
+    const denied: string[] = [];
+    const allowed: string[] = [];
 
-  for (const [did, isAllowed] of allowedMap) {
-    if (isAllowed) {
-      allowed.push(did);
+    for (const [did, isAllowed] of allowedMapOrSummary) {
+      if (isAllowed) {
+        allowed.push(did);
+      } else {
+        denied.push(did);
+      }
+    }
+
+    let summary = `AI Preference Summary:\n`;
+    summary += `  Allowed: ${allowed.length} participant(s)\n`;
+    summary += `  Denied: ${denied.length} participant(s)`;
+
+    if (denied.length > 0) {
+      summary += `\n\nDenied participants:`;
+      for (const did of denied) {
+        summary += `\n  - ${did}`;
+      }
+    }
+
+    return summary;
+  }
+
+  // Summary object shape
+  const lines: string[] = [];
+  lines.push(`Thread participants: ${allowedMapOrSummary.participants.length}`);
+
+  for (const p of allowedMapOrSummary.participants) {
+    if (p.aiPrefDenied) {
+      lines.push(
+        `  - @${p.handle} (${p.did}) — OPT OUT [${p.deniedCategories.join(', ')}]`
+      );
     } else {
-      denied.push(did);
+      lines.push(`  - @${p.handle} (${p.did}) — OK`);
     }
   }
 
-  let summary = `AI Preference Summary:\n`;
-  summary += `  Allowed: ${allowed.length} participant(s)\n`;
-  summary += `  Denied: ${denied.length} participant(s)`;
-
-  if (denied.length > 0) {
-    summary += `\n\nDenied participants:`;
-    for (const did of denied) {
-      summary += `\n  - ${did}`;
-    }
+  if (allowedMapOrSummary.hasOptOuts) {
+    lines.push(
+      `\n\u26a0 AI reply generation is BLOCKED: ${allowedMapOrSummary.optOutDids.length} participant(s) have opted out of inference/training.`
+    );
+  } else {
+    lines.push('\n\u2713 All participants allow AI inference/training.');
   }
 
-  return summary;
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------

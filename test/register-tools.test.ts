@@ -28,6 +28,7 @@ const EXPECTED_TOOLS = [
   "get-follows",
   "get-followers",
   "get-post-likes",
+  "get-mention-context",
   "list-resources",
 ];
 
