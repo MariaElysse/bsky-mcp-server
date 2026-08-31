@@ -11,10 +11,12 @@ import {
   mcpErrorResponse,
   mcpSuccessResponse,
 } from './utils.js';
-import { preprocessPosts, formatPostThread, filterThreadByAiPreferences } from "./llm-preprocessor.js";
+import { preprocessPosts, formatPostThread, formatPostThreadWithAiPrefs, filterThreadByAiPreferences } from "./llm-preprocessor.js";
 import { resourcesList } from './resources.js';
 import { fetchLinkMetadata, uploadThumbnail } from './link-preview.js';
-import { batchCheckAiPreferences, fetchAiPreferences, filterPostsByAiPreferences, READ_PREFERENCES } from './ai-preferences.js';
+import { batchCheckAiPreferences, fetchAiPreferences, filterPostsByAiPreferences, getDidsFromThread, READ_PREFERENCES } from './ai-preferences.js';
+import { getMentionStore } from './mention-store.js';
+import { fetchThreadContext } from './thread-context.js';
 
 export type AgentProvider = () => Agent | null;
 
@@ -1700,6 +1702,177 @@ Description: ${resource.description}
       }).join("\n\n");
 
       return mcpSuccessResponse(`Available MCP Resources:\n\n${formattedResources}\n\nTo use these resources, reference them by URI in your prompts or queries.`);
+    }
+  );
+
+  server.tool(
+    "get-mention-context",
+    "Fetch recent mentions of the authenticated user and return their full conversation thread context with AI preference filtering.",
+    {
+      limit: z.number().min(1).max(50).default(10)
+        .describe("Number of mentions to fetch (1-50)")
+    },
+    async ({ limit }) => {
+      const agent = getAgent();
+      if (!agent) {
+        return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
+      }
+
+      try {
+        let response: any;
+        try {
+          response = await (agent as any).app.bsky.notification.listNotifications({
+            limit,
+            reasons: ['mention']
+          });
+        } catch (error) {
+          return mcpErrorResponse(`Error fetching mentions: ${error instanceof Error ? error.message : String(error)}`);
+        }
+
+        if (!response || !response.success) {
+          return mcpErrorResponse(`Error fetching mentions: ${JSON.stringify(response)}`);
+        }
+
+        const notifications: any[] = response.data?.notifications ?? [];
+        if (notifications.length === 0) {
+          return mcpSuccessResponse("No recent mentions found.");
+        }
+
+        const mentionStore = getMentionStore();
+        const formattedItems: string[] = [];
+
+        for (const notification of notifications) {
+          const notifUri = notification.uri;
+          if (typeof notifUri !== 'string' || !/^at:\/\/did:[^/]+\/app\.bsky\.feed\.post\/[^/]+$/.test(notifUri)) {
+            return mcpErrorResponse("Invalid post URI format in notification");
+          }
+
+          // Deduplication: skip if already handled
+          const isHandled = await mentionStore.isHandled(notifUri);
+          if (isHandled) {
+            continue;
+          }
+
+          // Fetch raw thread directly (not through fetchThreadContext which pre-filters denied posts)
+          let rawThread: any = null;
+          try {
+            const threadResp = await agent.app.bsky.feed.getPostThread({
+              uri: notifUri,
+              depth: 100,
+              parentHeight: 100
+            });
+            if (threadResp.success && threadResp.data?.thread) {
+              rawThread = threadResp.data.thread;
+            }
+          } catch (_err) {
+            // Continue with notification data only
+          }
+
+          // Extract participant DIDs from the raw thread + notification author
+          const threadDids = rawThread ? getDidsFromThread(rawThread) : [];
+          const notifAuthorDid = notification.author?.did;
+          const dids = Array.from(new Set([
+            ...threadDids,
+            ...(notifAuthorDid ? [notifAuthorDid] : [])
+          ]));
+
+          // Batch-check AI preferences for all participants
+          let allowedMap: Map<string, boolean> = new Map();
+          if (dids.length > 0) {
+            try {
+              allowedMap = await batchCheckAiPreferences(agent as any, dids);
+            } catch (_err) {
+              // If preference check fails, allow all content (privacy-first fallback)
+              for (const did of dids) {
+                allowedMap.set(did, true);
+              }
+            }
+          }
+
+          // Status & post text — check if the mentioning author is denied
+          const authorDid = notifAuthorDid || rawThread?.post?.author?.did;
+          const isAuthorDenied = authorDid ? allowedMap.get(authorDid) === false : false;
+          const status = isAuthorDenied ? 'excluded_by_ai_prefs' : 'visible';
+
+          // Only show post text if the author is not denied (respect AI preferences)
+          const postText = isAuthorDenied
+            ? '[Post excluded by author AI preferences]'
+            : (notification.record?.text || rawThread?.post?.record?.text || '');
+
+          // Format thread with AI preferences — raw thread so tombstones are produced for denied posts.
+          // If the mentioning author is denied, replace the entire thread with a tombstone to prevent
+          // any private text from leaking through formatPostThreadWithAiPrefs (which marks it requested).
+          let formattedThread = '';
+          try {
+            if (!rawThread) {
+              formattedThread = '<posts>\n  <error>No thread data available</error>\n</posts>';
+            } else if (isAuthorDenied) {
+              // Replace the mentioning author's post with a tombstone in the raw thread
+              const deniedPost = rawThread.post;
+              if (deniedPost && deniedPost.author?.did === authorDid) {
+                // Create a tombstone version of this post
+                const tombstonePost = JSON.parse(JSON.stringify(deniedPost));
+                tombstonePost.record = {
+                  text: '[Post excluded by author AI preferences]',
+                  createdAt: deniedPost.record?.createdAt,
+                  $type: 'app.bsky.feed.post',
+                  __aiPrefExcluded: true,
+                };
+                // Replace the post in a new thread view
+                const tombstoneThread = JSON.parse(JSON.stringify(rawThread));
+                tombstoneThread.post = tombstonePost;
+                formattedThread = formatPostThreadWithAiPrefs(tombstoneThread, allowedMap);
+              } else {
+                // Author mismatch — still use full formatting
+                formattedThread = formatPostThreadWithAiPrefs(rawThread, allowedMap);
+              }
+            } else {
+              formattedThread = formatPostThreadWithAiPrefs(rawThread, allowedMap);
+            }
+          } catch {
+            formattedThread = '<posts>\n  <error>Failed to format thread</error>\n</posts>';
+          }
+
+          // Mention header line
+          const authorHandle = cleanHandle(notification.author?.handle || rawThread?.post?.author?.handle || 'unknown');
+          let header = `@${authorHandle} mentioned you`;
+
+          const isReply = !!(notification.record?.reply || rawThread?.parent || rawThread?.post?.record?.reply);
+          if (isReply) {
+            let rootNode = rawThread;
+            while (rootNode?.parent && rootNode.parent.post) {
+              rootNode = rootNode.parent;
+            }
+            let rootTitle = 'a post';
+            const rootAuthorDid = rootNode?.post?.author?.did;
+            const isRootDenied = rootAuthorDid ? allowedMap.get(rootAuthorDid) === false : false;
+            const rootText = !isRootDenied ? rootNode?.post?.record?.text : undefined;
+            if (rootText) {
+              rootTitle = `"${rootText.length > 50 ? rootText.slice(0, 47) + '...' : rootText}"`;
+            } else if (rootNode?.post?.author?.handle) {
+              rootTitle = `@${cleanHandle(rootNode.post.author.handle)}'s post`;
+            }
+            header += ` in a reply to ${rootTitle}`;
+          } else {
+            header += ` in a post`;
+          }
+
+          const time = notification.indexedAt || notification.record?.createdAt || new Date().toISOString();
+
+          const itemIndex = formattedItems.length + 1;
+          const block = `${itemIndex}. ${header}\n   Post: "${postText}"\n   Thread: ${formattedThread}\n   Time: ${time}\n   Status: ${status}`;
+          formattedItems.push(block);
+        }
+
+        if (formattedItems.length === 0) {
+          return mcpSuccessResponse("No recent mentions found.");
+        }
+
+        const resultText = `Retrieved ${formattedItems.length} mention(s):\n\n${formattedItems.join('\n\n')}`;
+        return mcpSuccessResponse(resultText);
+      } catch (error) {
+        return mcpErrorResponse(`Error fetching mentions: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   );
 }
