@@ -11,5 +11,6 @@
       "composite": true,
       "declaration": true
     },
-    "include": ["src/**/*", "scripts/**/*", "test/**/*"]
+    "include": ["src/**/*", "scripts/**/*", "test/**/*"],
+    "exclude": ["src/remote/**/*", "src/scripts/generate-signing-key.ts", "test/remote-oauth.test.ts"]
   }
