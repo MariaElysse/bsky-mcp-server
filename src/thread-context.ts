@@ -80,20 +80,32 @@ export function formatThreadForReply(
   threadView: any,
   mentionedPostUri: string
 ): ThreadContextResult {
-  // Extract all participants first (before filtering)
-  const participants = extractAllParticipants(threadView);
+  if (!threadView) {
+    return {
+      thread: null,
+      participants: [],
+      mentionedPostUri,
+      formattedText: '<posts>\n  <error>No thread data available</error>\n</posts>',
+    };
+  }
 
-  // Format the full thread using llm-preprocessor conventions
+  // Isolate the branch containing the mentioned post if possible
+  const targetBranch = isolateBranch(threadView, mentionedPostUri) || threadView;
+
+  // Extract all participants from that branch
+  const participants = extractAllParticipants(targetBranch);
+
+  // Format the thread branch using llm-preprocessor conventions
   let formattedText = '';
   try {
-    formattedText = formatPostThread(threadView);
+    formattedText = formatPostThread(targetBranch);
   } catch (_err) {
     // Fallback: produce a minimal summary
     formattedText = '<posts>\n  <error>Failed to format thread</error>\n</posts>';
   }
 
   return {
-    thread: threadView,
+    thread: targetBranch,
     participants,
     mentionedPostUri,
     formattedText,

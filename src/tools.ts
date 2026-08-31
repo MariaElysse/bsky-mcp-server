@@ -15,6 +15,9 @@ import { preprocessPosts, formatPostThread, filterThreadByAiPreferences } from "
 import { resourcesList } from './resources.js';
 import { fetchLinkMetadata, uploadThumbnail } from './link-preview.js';
 import { batchCheckAiPreferences, fetchAiPreferences, filterPostsByAiPreferences, READ_PREFERENCES } from './ai-preferences.js';
+import { getMentionStore } from './mention-store.js';
+import { fetchThreadContext } from './thread-context.js';
+import { generateMentionReply } from './prompts.js';
 
 export type AgentProvider = () => Agent | null;
 
@@ -1700,6 +1703,240 @@ Description: ${resource.description}
       }).join("\n\n");
 
       return mcpSuccessResponse(`Available MCP Resources:\n\n${formattedResources}\n\nTo use these resources, reference them by URI in your prompts or queries.`);
+    }
+  );
+
+  server.tool(
+    "run-mention-monitor",
+    "Poll Bluesky notifications for mentions, deduplicate, apply AI preferences, and optionally auto-reply",
+    {
+      poll: z.boolean().describe("If true, poll for new mentions; if false, just return last known state"),
+      autoReply: z.boolean().optional().default(false).describe("If true and poll=true, attempt to auto-reply to each mention"),
+      maxMentions: z.number().min(1).max(100).optional().default(10).describe("Max mentions to process per run"),
+    },
+    async ({ poll, autoReply = false, maxMentions = 10 }) => {
+      const mentionStore = getMentionStore();
+
+      if (!poll) {
+        try {
+          const allEntries = await mentionStore.getAll();
+          const pending = allEntries.filter((e) => e.status === "pending").length;
+          const replied = allEntries.filter((e) => e.status === "replied").length;
+          const failed = allEntries.filter((e) => e.status === "failed").length;
+
+          const stateOutput = `Mention monitor state:
+- Pending: ${pending}
+- Replied: ${replied}
+- Failed: ${failed}`;
+
+          return mcpSuccessResponse(stateOutput);
+        } catch (error) {
+          return mcpErrorResponse(
+            `Error reading mention store state: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+      }
+
+      const agent = getAgent();
+      if (!agent) {
+        return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
+      }
+
+      try {
+        // Step 1: Fetch notifications via agent.app.bsky.notification.listNotifications with reason='mention'
+        let notifications: any[] = [];
+        try {
+          const response = await agent.app.bsky.notification.listNotifications({
+            reasons: ["mention"],
+            limit: Math.min(maxMentions, 100),
+          });
+          if (response.success && response.data?.notifications) {
+            notifications = response.data.notifications;
+          }
+        } catch (fetchErr: any) {
+          const errMsg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+          return mcpErrorResponse(`Error fetching notifications: ${errMsg}`);
+        }
+
+        let scannedCount = 0;
+        let newMentionsCount = 0;
+        let repliedCount = 0;
+        let skippedCount = 0;
+        let failedCount = 0;
+
+        // Process up to maxMentions
+        const toProcess = notifications.slice(0, maxMentions);
+        scannedCount = toProcess.length;
+
+        for (const notif of toProcess) {
+          const postUri = notif?.uri || notif?.reasonSubject;
+
+          // Step 2a: Check deduplication - skip if already handled
+          if (!postUri || typeof postUri !== "string") {
+            failedCount++;
+            if (postUri) {
+              await mentionStore.markFailed(postUri, "Missing or invalid notification URI");
+            }
+            continue;
+          }
+
+          const alreadyHandled = await mentionStore.isHandled(postUri);
+          if (alreadyHandled) {
+            skippedCount++;
+            continue;
+          }
+
+          // Step 2b: Validate the mentioning post URI format
+          const uriMatch = postUri.match(
+            /^at:\/\/([a-zA-Z0-9._:%-]+)\/app\.bsky\.feed\.post\/([a-zA-Z0-9._~-]+)$/
+          );
+          if (!uriMatch) {
+            failedCount++;
+            await mentionStore.markFailed(postUri, "Invalid post URI format");
+            continue;
+          }
+
+          // New valid mention
+          newMentionsCount++;
+
+          // Step 2c: Apply AI preference filtering on the mentioning user's content
+          const authorDid = notif.author?.did || uriMatch[1];
+          let isAllowed = true;
+          if (authorDid && authorDid.startsWith("did:")) {
+            try {
+              const prefMap = await batchCheckAiPreferences(agent as any, [authorDid]);
+              isAllowed = prefMap.get(authorDid) ?? true;
+            } catch {
+              // On error, default to allowed
+              isAllowed = true;
+            }
+          }
+
+          if (!isAllowed) {
+            skippedCount++;
+            await mentionStore.markFailed(postUri, "AI preference denied");
+            continue;
+          }
+
+          // Step 2d: If autoReply=true and not denied
+          if (autoReply) {
+            try {
+              await mentionStore.markInProgress(postUri);
+
+              // Fetch thread context using thread-context.ts
+              const threadContext = await fetchThreadContext(agent as any, postUri);
+
+              // Generate reply text based on the mention (using prompts from prompts.ts)
+              const authorHandle = notif.author?.handle || notif.author?.displayName || "";
+              const postText = notif.record?.text || "";
+              const replyText = generateMentionReply(authorHandle, postText, threadContext);
+
+              // Reply content validation (max 256 chars, no empty replies)
+              if (!replyText || replyText.trim().length === 0) {
+                throw new Error("Generated reply text is empty");
+              }
+              if (replyText.length > 256) {
+                throw new Error(
+                  `Generated reply text exceeds 256 characters (${replyText.length})`
+                );
+              }
+
+              // Create reply using create-reply tool logic (resolving root and parent CID)
+              let parentCid: string;
+              let rootUri: string;
+              let rootCid: string;
+
+              if (threadContext?.thread?.post?.cid) {
+                const parentPost = threadContext.thread.post;
+                parentCid = parentPost.cid;
+                const parentRecord = parentPost.record;
+                if (parentRecord?.reply?.root) {
+                  rootUri = parentRecord.reply.root.uri;
+                  rootCid = parentRecord.reply.root.cid;
+                } else {
+                  rootUri = postUri;
+                  rootCid = parentCid;
+                }
+              } else {
+                const cidResponse = await agent.app.bsky.feed.getPostThread({ uri: postUri });
+                if (!cidResponse.success) {
+                  throw new Error(`Could not resolve post CID for reply: ${postUri}`);
+                }
+                const threadPost = cidResponse.data.thread as any;
+                if (!threadPost?.post?.cid) {
+                  throw new Error(`Post not found in thread: ${postUri}`);
+                }
+                const parentPost = threadPost.post;
+                parentCid = parentPost.cid;
+                const parentRecord = parentPost.record;
+                if (parentRecord?.reply?.root) {
+                  rootUri = parentRecord.reply.root.uri;
+                  rootCid = parentRecord.reply.root.cid;
+                } else {
+                  rootUri = postUri;
+                  rootCid = parentCid;
+                }
+              }
+
+              const rt = new RichText({ text: replyText });
+              try {
+                await rt.detectFacets(agent);
+              } catch {
+                // Ignore facet detection error if offline
+              }
+
+              const record: any = {
+                text: rt.text,
+                createdAt: new Date().toISOString(),
+                reply: {
+                  parent: { uri: postUri, cid: parentCid },
+                  root: { uri: rootUri, cid: rootCid },
+                },
+              };
+
+              if (rt.facets && rt.facets.length > 0) {
+                record.facets = rt.facets;
+              }
+
+              let postRes: any;
+              if (typeof agent.post === "function") {
+                postRes = await agent.post(record);
+              } else if (agent.app?.bsky?.feed?.post?.create) {
+                postRes = await agent.app.bsky.feed.post.create(
+                  { repo: agent.session?.did },
+                  record
+                );
+              } else {
+                throw new Error("Agent does not support posting");
+              }
+
+              const createdUri = postRes?.uri || postRes?.data?.uri || postUri;
+              await mentionStore.markCompleted(postUri, createdUri);
+              repliedCount++;
+            } catch (replyErr: any) {
+              failedCount++;
+              const errorMsg = replyErr instanceof Error ? replyErr.message : String(replyErr);
+              await mentionStore.markFailed(postUri, errorMsg);
+            }
+          } else {
+            // Track new mention as in-progress / pending
+            await mentionStore.markInProgress(postUri);
+          }
+        }
+
+        const output = `Mention monitor results:
+- Scanned ${scannedCount} notifications
+- Found ${newMentionsCount} new mentions
+- ${repliedCount} mention(s) replied to automatically
+- ${skippedCount} mention(s) skipped (already handled / AI preference denied)
+- ${failedCount} mention(s) failed with errors`;
+
+        return mcpSuccessResponse(output);
+      } catch (error) {
+        return mcpErrorResponse(
+          `Error running mention monitor: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
     }
   );
 }
