@@ -674,8 +674,18 @@ function formatThreadViewRecursive(
  */
 export function formatPostThreadWithAiPrefs(
   threadView: any,
-  allowedDids: Map<string, boolean>
+  allowedDids: Map<string, boolean>,
+  allowRequestedPost: boolean = true
 ): string {
+  if (!threadView || typeof threadView !== 'object') {
+    return '<posts>\n  <error>No thread data available</error>\n</posts>';
+  }
+
+  // Handle case where threadView is already a tombstone
+  if ('__aiPrefExcluded' in threadView) {
+    return `<posts>\n${formatTombstone(threadView, '  ')}\n</posts>`;
+  }
+
   // Start building the posts XML container
   let output = "<posts>\n";
 
@@ -695,23 +705,24 @@ export function formatPostThreadWithAiPrefs(
     // Mark the originally requested post
     threadView.isRequestedPost = true;
 
-    // Filter each post in the chain by AI preferences (requested post is always allowed)
-    const filteredChain = parentChain.map((pv: any, idx: number) => {
-      if (idx === 0 && pv.isRequestedPost) {
-        return filterThreadByAiPreferences(pv, allowedDids, true);
-      }
-      // Parent posts are also always shown for context
-      return filterThreadByAiPreferences(pv, allowedDids, false);
+    // Filter each post in the chain by AI preferences
+    const filteredChain不易 = parentChain.map((pv: any) => {
+      const isReq = pv === threadView || pv.isRequestedPost;
+      const allowThis = isReq ? allowRequestedPost : false;
+      return filterThreadByAiPreferences(pv, allowedDids, allowThis);
     });
 
     // Process the filtered chain
-    output += processFilteredThreadViewChain(filteredChain, 0);
+    output += processFilteredThreadViewChain(filteredChain不易, 0);
   } else {
     // No parents, just process the given thread
-    // Mark this as the requested post and always allow it
     threadView.isRequestedPost = true;
-    const filtered = filterThreadByAiPreferences(threadView, allowedDids, true);
-    output += formatThreadViewRecursive(filtered, 0, true);
+    const filtered = filterThreadByAiPreferences(threadView, allowedDids, allowRequestedPost);
+    if (filtered && typeof filtered === 'object' && '__aiPrefExcluded' in filtered) {
+      output += formatTombstone(filtered, '  ') + '\n';
+    } else {
+      output += formatThreadViewRecursive(filtered, 0, allowRequestedPost);
+    }
   }
 
   // Close the posts container
