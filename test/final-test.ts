@@ -32,6 +32,7 @@ async function main() {
     ["link-preview", `node build/test/link-preview/test-link-preview.js`],
     ["ai-preferences", `node build/test/ai-preferences.test.js`],
     ["ai-preferences-tombstone", `node build/test/ai-preferences-tombstone.test.js`],
+    ["mention-store", `node build/test/mention-store.test.js`],
   ];
 
   const results = [];
