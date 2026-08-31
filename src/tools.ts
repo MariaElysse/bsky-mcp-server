@@ -1875,4 +1875,158 @@ Description: ${resource.description}
       }
     }
   );
+
+  server.tool(
+    "create-reply",
+    "Create a reply to an existing Bluesky post. The tool resolves root/parent CID references automatically, checks AI preferences of the target author, and deduplicates against previously handled mentions.",
+    {
+      uri: z.string().describe("URI of the post being replied to (e.g., at://did:plc:abcdef/app.bsky.feed.post/123)"),
+      text: z.string().max(256).min(1).describe("The reply content (max 256 chars per Bluesky spec)"),
+      embedUrl: z.string().url().optional().describe("Optional URL for link preview embed")
+    },
+    async ({ uri, text, embedUrl }) => {
+      const agent = getAgent();
+      if (!agent) {
+        return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
+      }
+
+      try {
+        // Validate URI format
+        if (!uri || !uri.startsWith('at://did:plc:') || !uri.includes('/app.bsky.feed.post/')) {
+          return mcpErrorResponse("Invalid post URI format. Expected format: at://did:plc:abcdef/app.bsky.feed.post/123");
+        }
+
+        // Check mention deduplication — skip if already replied
+        const mentionStore = getMentionStore();
+        const isHandled = await mentionStore.isHandled(uri);
+        if (isHandled) {
+          return mcpSuccessResponse(`Already handled: reply to ${uri} was previously processed.`);
+        }
+
+        // Mark as in-progress to prevent TOCTOU race
+        try {
+          await mentionStore.markInProgress(uri);
+        } catch (_err) {
+          // If marking fails, continue — the isHandled check above already protected us
+        }
+
+        // Fetch the post via getPostThread to resolve parent/root CIDs correctly
+        let threadResp: any;
+        try {
+          threadResp = await agent.app.bsky.feed.getPostThread({
+            uri,
+            depth: 0,
+            parentHeight: 0
+          });
+        } catch (error) {
+          return mcpErrorResponse(`Error fetching post for reply: ${error instanceof Error ? error.message : String(error)}`);
+        }
+
+        if (!threadResp?.success || !threadResp.data?.thread) {
+          // Mark as failed so it can be retried later
+          await mentionStore.markFailed(uri, "Post not found or inaccessible");
+          return mcpErrorResponse(`Post not found or inaccessible: ${uri}`);
+        }
+
+        const threadPost = threadResp.data.thread as any;
+        const parentCid = threadPost.post?.cid;
+        if (!parentCid) {
+          await mentionStore.markFailed(uri, "Could not resolve post CID");
+          return mcpErrorResponse(`Could not resolve post CID for: ${uri}`);
+        }
+
+        // Determine root — if the target post is itself a reply, follow its root ref;
+        // otherwise both parent and root point to the same post.
+        const parentRecord = threadPost.post?.record;
+        let rootUri: string;
+        let rootCid: string;
+        if (parentRecord?.reply) {
+          rootUri = parentRecord.reply.root.uri;
+          rootCid = parentRecord.reply.root.cid;
+        } else {
+          rootUri = uri;
+          rootCid = parentCid;
+        }
+
+        // AI preference check on the target post's author before allowing reply
+        const targetAuthorDid = threadPost.post?.author?.did;
+        if (targetAuthorDid) {
+          try {
+            const allowedMap = await batchCheckAiPreferences(agent as any, [targetAuthorDid]);
+            if (allowedMap.get(targetAuthorDid) === false) {
+              // Mark as failed so it can be retried later with different prefs
+              await mentionStore.markFailed(uri, "Target author has opted out of AI preferences");
+              return mcpErrorResponse(`Cannot reply: the target post's author (${targetAuthorDid}) has opted out of AI inference/training.`);
+            }
+          } catch (_err) {
+            // If preference check fails, allow the reply (privacy-first fallback)
+          }
+        }
+
+        // Use RichText for facet detection (mentions, hashtags)
+        const rt = new RichText({ text });
+        try {
+          await rt.detectFacets(agent);
+        } catch (_err) {
+          // Facet detection is best-effort; continue without facets if it fails
+        }
+
+        const record: any = {
+          text: rt.text,
+          createdAt: new Date().toISOString(),
+        };
+
+        if (rt.facets && rt.facets.length > 0) {
+          record.facets = rt.facets;
+        }
+
+        // Set up the reply reference with correct root/parent CIDs
+        record.reply = {
+          parent: { uri, cid: parentCid },
+          root: { uri: rootUri, cid: rootCid }
+        };
+
+        // Generate link preview embed if embedUrl is provided
+        if (embedUrl) {
+          const metadata = await fetchLinkMetadata(embedUrl);
+          if (metadata) {
+            const externalEmbed: any = {
+              $type: 'app.bsky.embed.external',
+              external: {
+                uri: metadata.url,
+                title: metadata.title,
+                description: metadata.description,
+              },
+            };
+
+            if (metadata.imageUrl) {
+              try {
+                const thumbBlob = await uploadThumbnail(agent, metadata.imageUrl);
+                if (thumbBlob) {
+                  externalEmbed.external.thumb = thumbBlob;
+                }
+              } catch (_err) {
+                // Thumbnail upload is best-effort
+              }
+            }
+
+            record.embed = externalEmbed;
+          }
+        }
+
+        const response = await agent.post(record);
+
+        // Mark as completed in the dedup store
+        try {
+          await mentionStore.markCompleted(uri, response.uri);
+        } catch (_err) {
+          // Store failure is non-critical — the reply was still posted successfully
+        }
+
+        return mcpSuccessResponse(`Reply created successfully! URI: ${response.uri}`);
+      } catch (error) {
+        return mcpErrorResponse(`Error creating reply: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
 }
