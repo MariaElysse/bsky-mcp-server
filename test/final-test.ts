@@ -33,6 +33,7 @@ async function main() {
     ["ai-preferences", `node build/test/ai-preferences.test.js`],
     ["ai-preferences-tombstone", `node build/test/ai-preferences-tombstone.test.js`],
     ["mention-store", `node build/test/mention-store.test.js`],
+    ["thread-context", `node build/test/thread-context.test.js`],
     ["mention-context", `node build/test/mention-context.test.js`],
   ];
 

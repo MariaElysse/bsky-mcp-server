@@ -3,9 +3,11 @@
  * the agent was mentioned, with AI preference filtering.
  */
 
+import { formatPostThread } from './llm-preprocessor.js';
 import type { AtpAgent } from '@atproto/api';
 import {
   batchCheckAiPreferences,
+  filterThreadByAiPreferences as aiPrefFilterThread,
   getDidsFromThread,
   READ_PREFERENCES,
 } from './ai-preferences.js';
@@ -118,12 +120,15 @@ export function formatThreadForReply(
   threadView: any,
   mentionedPostUri: string
 ): ThreadContextResult {
+  // Extract all participants first (before filtering)
   const participants = extractAllParticipants(threadView);
 
+  // Format the full thread using llm-preprocessor conventions
   let formattedText = '';
   try {
     formattedText = formatPostThread(threadView);
   } catch (_err) {
+    // Fallback: produce a minimal summary
     formattedText = '<posts>\n  <error>Failed to format thread</error>\n</posts>';
   }
 
@@ -144,7 +149,7 @@ export function formatThreadForReply(
  * preference filtering. Returns formatted context suitable for LLM consumption.
  */
 export async function fetchThreadContext(
-  agent: any,
+  agent: AtpAgent,
   postUri: string
 ): Promise<ThreadContextResult> {
   try {
@@ -155,7 +160,7 @@ export async function fetchThreadContext(
       parentHeight: 100,
     });
 
-    if (!response?.data?.thread) {
+    if (!response.data?.thread) {
       return buildEmptyResult(postUri);
     }
 
@@ -227,7 +232,7 @@ function buildEmptyResult(mentionedPostUri: string): ThreadContextResult {
  * Fetches a full thread context and returns metadata about excluded posts.
  */
 export async function fetchThreadContextWithMeta(
-  agent: any,
+  agent: AtpAgent,
   postUri: string
 ): Promise<{ thread: string; excludedCount: number }> {
   try {
@@ -237,13 +242,16 @@ export async function fetchThreadContextWithMeta(
       parentHeight: 100,
     });
 
-    if (!response?.data?.thread) {
+    if (!response.data?.thread) {
       return { thread: '', excludedCount: 0 };
     }
 
     const threadView = response.data.thread;
+
+    // Collect all DIDs from the thread for batch checking
     const allDids = extractAllParticipants(threadView);
 
+    // Batch-check preferences
     let allowedMap: Map<string, boolean> = new Map();
     if (allDids.length > 0) {
       try {
@@ -255,12 +263,14 @@ export async function fetchThreadContextWithMeta(
       }
     }
 
-    const filteredThread = aiPrefFilterThread(threadView, allowedMap, false);
+    // Filter the thread by AI preferences
+    const filteredThread = aiPrefFilterThread(threadView, allowedMap, true);
 
     if (!filteredThread) {
       return { thread: '', excludedCount: allDids.length };
     }
 
+    // Format the thread structure
     let threadData = '';
     try {
       threadData = formatPostThread(filteredThread);
@@ -346,9 +356,11 @@ export function isolateBranch(threadView: any, targetUri: string): any | null {
 
   const post = threadView.post;
   if (post?.uri === targetUri) {
+    // Found the target — clone to avoid mutating original
     return JSON.parse(JSON.stringify(threadView));
   }
 
+  // Check parent chain
   if (threadView.parent && typeof threadView.parent === 'object') {
     const parentBranch = isolateBranch(threadView.parent, targetUri);
     if (parentBranch) {
@@ -356,6 +368,7 @@ export function isolateBranch(threadView: any, targetUri: string): any | null {
     }
   }
 
+  // Check replies
   if (threadView.replies && Array.isArray(threadView.replies)) {
     for (const reply of threadView.replies) {
       const branch = isolateBranch(reply, targetUri);
