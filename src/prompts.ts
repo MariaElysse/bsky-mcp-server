@@ -26,6 +26,72 @@ Please keep the summary concise (about 3-5 paragraphs) and focus on the most mea
 `;
 
 /**
+ * A prompt template that guides generating appropriate responses to Bluesky mentions.
+ */
+export const MENTION_REPLY_PROMPT = `
+You are a helpful, courteous assistant on Bluesky.
+Generate a concise, relevant reply to a user's mention.
+
+Requirements:
+- Stay within 256 characters (hard limit)
+- Be conversational, helpful, and polite
+- Address the user by their handle
+- Do not generate empty replies or generic spam
+`;
+
+/**
+ * Build a prompt string for generating a reply to a specific mention.
+ */
+export function buildMentionReplyPrompt(
+  authorHandle: string,
+  postText: string,
+  contextText?: string
+): string {
+  const cleanHandle = authorHandle ? `@${authorHandle.replace(/^@/, '')}` : 'the user';
+  let prompt = `${MENTION_REPLY_PROMPT.trim()}\n\nAuthor: ${cleanHandle}\nMentioned Post: "${postText}"`;
+  if (contextText) {
+    prompt += `\nThread Context:\n${contextText}`;
+  }
+  prompt += `\n\nGenerate reply:`;
+  return prompt;
+}
+
+/**
+ * Generates an appropriate auto-reply text for a mention.
+ * Guaranteed to be non-empty and at most 256 characters.
+ */
+export function generateMentionReply(
+  authorHandle: string,
+  mentionText?: string,
+  _threadContext?: any
+): string {
+  const handle = authorHandle ? `@${authorHandle.replace(/^@/, '')}` : '';
+  const text = (mentionText || '').trim();
+
+  let reply = '';
+  if (text) {
+    if (/\b(hello|hi|hey|greetings)\b/i.test(text)) {
+      reply = `Hello ${handle}! Thanks for reaching out. How can I help you today?`.trim();
+    } else if (/\b(help|how|what|why|where|when|who)\b/i.test(text)) {
+      reply = `Hi ${handle}, thanks for your question! I received your mention and am looking into it.`.trim();
+    } else if (/\b(thank|thanks|thx|appreciate)\b/i.test(text)) {
+      reply = `You're welcome ${handle}! Glad I could help.`.trim();
+    } else {
+      reply = `Hi ${handle}, thanks for the mention! I've received your message.`.trim();
+    }
+  } else {
+    reply = `Hi ${handle}, thanks for connecting!`.trim();
+  }
+
+  // Enforce max 256 chars
+  if (reply.length > 256) {
+    reply = reply.substring(0, 253) + '...';
+  }
+
+  return reply;
+}
+
+/**
  * Registers all Bluesky MCP prompts on the provided MCP server
  * @param server The MCP server instance
  */
@@ -44,4 +110,22 @@ export function registerPrompts(server: McpServer): void {
       }]
     })
   );
-} 
+
+  // Mention reply prompt
+  server.prompt(
+    "reply-to-mention",
+    {
+      authorHandle: z.string().describe("Handle of the user who mentioned"),
+      mentionText: z.string().describe("Text of the mentioning post"),
+    },
+    ({ authorHandle, mentionText }) => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: buildMentionReplyPrompt(authorHandle, mentionText)
+        }
+      }]
+    })
+  );
+}
