@@ -3,15 +3,13 @@
  * the agent was mentioned, with AI preference filtering.
  */
 
-import { formatPostThread } from './llm-preprocessor.js';
-import type { AtpAgent } from '@atproto/api';
+import { AtpAgent } from '@atproto/api';
 import {
   batchCheckAiPreferences,
   filterThreadByAiPreferences as aiPrefFilterThread,
   getDidsFromThread,
-  READ_PREFERENCES,
 } from './ai-preferences.js';
-import { formatPostThread, formatPostThreadWithAiPrefs, filterThreadByAiPreferences as aiPrefFilterThread } from './llm-preprocessor.js';
+import { formatPostThread, formatPostThreadWithAiPrefs } from './llm-preprocessor.js';
 
 // ---------------------------------------------------------------------------
 // Types
