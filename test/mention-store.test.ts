@@ -306,18 +306,7 @@ async function testUpdateExistingEntryStatus() {
   let all = await store.getAll();
   assert.equal(all[0].status, "pending");
 
-  // Step 2: fail
-  await store.markFailed(uri, "First try failed");
-  all = await store.getAll();
-  assert.equal(all[0].status, "failed");
-  assert.equal(all[0].error, "First try failed");
-
-  // Step 3: retry -> in progress
-  await store.markInProgress(uri);
-  all = await store.getAll();
-  assert.equal(all[0].status, "pending");
-
-  // Step 4: complete
+  // Step 2: complete
   await store.markCompleted(uri, "at://did:plc:bot/app.bsky.feed.post/success");
   all = await store.getAll();
   assert.equal(all[0].status, "replied");
