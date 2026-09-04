@@ -196,6 +196,10 @@ export class MentionStore {
       const store = await readStore(this.storePath);
       const idx = store.entries.findIndex((e) => e.uri === uri);
       if (idx !== -1) {
+        // Prevent terminal-state regression: once replied/failed, never go back to pending
+        if (store.entries[idx].status === "replied" || store.entries[idx].status === "failed") {
+          return;
+        }
         store.entries[idx].status = "pending";
         store.entries[idx].timestamp = Date.now();
       } else {
