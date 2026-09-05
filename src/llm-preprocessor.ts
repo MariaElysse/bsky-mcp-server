@@ -1,6 +1,6 @@
 // Implements the spec described in /POST_FORMAT_SPEC.md
 import { formatISO9075 } from 'date-fns';
-import type { 
+import type {
   AppBskyFeedDefs,
   AppBskyEmbedImages,
   AppBskyEmbedVideo,
@@ -11,6 +11,13 @@ import type {
 } from '@atproto/api';
 import { RichText } from '@atproto/api';
 import { escapeXml } from './utils.js';
+
+/**
+ * Base URL for the Bluesky web frontend.  Defaults to bsky.app (the
+ * universal web client) but can be overridden for custom frontends.
+ * Used to generate bsky_url attributes in formatted output.
+ */
+const BSKY_WEB_URL = (process.env.BSKY_WEB_URL ?? 'https://bsky.app').replace(/\/$/, '');
 
 /**
  * Convert Bluesky post text + facets into Markdown
@@ -31,7 +38,7 @@ export function facetsToMarkdown(text: string, facets?: any[]): string {
       //markdown += `[${segment.text}](${segment.link?.uri})`;
       markdown += `<${segment.link?.uri}>`; // use the markdown auto-link syntax for simplicity for the LLM instead of linking the text fragment
     } else if (segment.isMention()) {
-      markdown += `[${segment.text}](https://bsky.app/profile/${segment.mention?.did})`;
+      markdown += `[${segment.text}](${BSKY_WEB_URL}/profile/${segment.mention?.did})`;
     } else if (segment.isTag()) {
       markdown += `#${segment.tag?.tag}`;
     } else {
@@ -55,14 +62,16 @@ function formatDate(dateString: string): string {
 }
 
 /**
- * Creates a Bluesky URL from a URI
+ * Creates a Bluesky web URL from a post URI.
+ * Uses BSKY_WEB_URL env var (default: https://bsky.app) so it works
+ * with custom web frontends on alternate endpoints.
  */
 function createBskyUrl(uri: string, handle?: string): string {
   try {
     const parts = uri.split('/');
     const did = parts[2];
     const rkey = parts[parts.length - 1];
-    return `https://bsky.app/profile/${handle || did}/post/${rkey}`;
+    return `${BSKY_WEB_URL}/profile/${handle || did}/post/${rkey}`;
   } catch (e) {
     return '';
   }
@@ -544,7 +553,7 @@ function formatThreadViewRecursive(
     }
 
     // Start building post tag attributes
-    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="https://bsky.app/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
+    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
     postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
     postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
 
@@ -569,7 +578,7 @@ function formatThreadViewRecursive(
       const quoted = post.embed.record;
       if (quoted.uri && quoted.author && quoted.author.handle) {
         output += `${indent}  <quoted_post uri="${quoted.uri}" `;
-        output += `bsky_url="https://bsky.app/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
+        output += `bsky_url="${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
         output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
         output += `author_handle="${quoted.author.handle}" `;
         output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;
@@ -787,7 +796,7 @@ function processFilteredThreadViewChain(postChain: any[], indentLevel: number): 
     }
 
     // Start building post tag attributes
-    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="https://bsky.app/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
+    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
     postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
     postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
 
@@ -812,7 +821,7 @@ function processFilteredThreadViewChain(postChain: any[], indentLevel: number): 
       const quoted = post.embed.record;
       if (quoted.uri && quoted.author && quoted.author.handle) {
         output += `${indent}  <quoted_post uri="${quoted.uri}" `;
-        output += `bsky_url="https://bsky.app/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
+        output += `bsky_url="${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
         output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
         output += `author_handle="${quoted.author.handle}" `;
         output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;
@@ -965,7 +974,7 @@ function processFilteredThreadViewPost(threadViewPost: any, indentLevel: number)
     }
 
     // Start building post tag attributes
-    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="https://bsky.app/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
+    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
     postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
     postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
 
@@ -990,7 +999,7 @@ function processFilteredThreadViewPost(threadViewPost: any, indentLevel: number)
       const quoted = post.embed.record;
       if (quoted.uri && quoted.author && quoted.author.handle) {
         output += `${indent}  <quoted_post uri="${quoted.uri}" `;
-        output += `bsky_url="https://bsky.app/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
+        output += `bsky_url="${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
         output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
         output += `author_handle="${quoted.author.handle}" `;
         output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;
@@ -1182,7 +1191,7 @@ function processThreadViewPostChain(postChain: any[], indentLevel: number): stri
     }
     
     // Start building post tag attributes
-    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="https://bsky.app/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
+    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
     postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
     postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
     
@@ -1207,7 +1216,7 @@ function processThreadViewPostChain(postChain: any[], indentLevel: number): stri
       const quoted = post.embed.record;
       if (quoted.uri && quoted.author && quoted.author.handle) {
         output += `${indent}  <quoted_post uri="${quoted.uri}" `;
-        output += `bsky_url="https://bsky.app/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
+        output += `bsky_url="${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
         output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
         output += `author_handle="${quoted.author.handle}" `;
         output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;
@@ -1351,7 +1360,7 @@ export function processThreadViewPost(threadViewPost: any, indentLevel: number):
     }
     
     // Start building post tag attributes
-    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="https://bsky.app/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
+    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
     postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
     postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
     
@@ -1376,7 +1385,7 @@ export function processThreadViewPost(threadViewPost: any, indentLevel: number):
       const quoted = post.embed.record;
       if (quoted.uri && quoted.author && quoted.author.handle) {
         output += `${indent}  <quoted_post uri="${quoted.uri}" `;
-        output += `bsky_url="https://bsky.app/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
+        output += `bsky_url="${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
         output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
         output += `author_handle="${quoted.author.handle}" `;
         output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;

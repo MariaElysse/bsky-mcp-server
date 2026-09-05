@@ -739,7 +739,7 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
           return `#${index + 1}: ${topic.topic}
 Post Count: ${topic.postCount} posts
 Started Trending: ${startTime}
-Feed Link: https://bsky.app${topic.link}
+Feed Link: ${process.env.BSKY_WEB_URL || 'https://bsky.app'}${topic.link}
 ---`;
         }).join("\n\n");
 
@@ -748,7 +748,7 @@ Feed Link: https://bsky.app${topic.link}
         if (includeSuggested && suggested && suggested.length > 0) {
           const formattedSuggested = suggested.map((topic: any, index: number) => {
             return `#${index + 1}: ${topic.topic}
-Feed Link: https://bsky.app${topic.link}
+Feed Link: ${process.env.BSKY_WEB_URL || 'https://bsky.app'}${topic.link}
 ---`;
           }).join("\n\n");
 
