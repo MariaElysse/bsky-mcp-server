@@ -162,6 +162,12 @@ export function cleanHandle(input: string): string {
 
 
 /**
+ * Base URL for the Bluesky web frontend.  Defaults to bsky.app (the
+ * universal web client) but can be overridden for custom frontends.
+ */
+const BSKY_WEB_URL = (process.env.BSKY_WEB_URL ?? 'https://bsky.app').replace(/\/$/, '');
+
+/**
  * Convert Bluesky post text + facets into Markdown
  * @param text The post text content
  * @param facets Optional array of facets from the post
@@ -180,7 +186,7 @@ export function facetsToMarkdown(text: string, facets?: any[]): string {
       //markdown += `[${segment.text}](${segment.link?.uri})`;
       markdown += `<${segment.link?.uri}>`; // use the markdown auto-link syntax for simplicity for the LLM instead of linking the text fragment
     } else if (segment.isMention()) {
-      markdown += `[${segment.text}](https://bsky.app/profile/${segment.mention?.did})`;
+      markdown += `[${segment.text}](${BSKY_WEB_URL}/profile/${segment.mention?.did})`;
     } else if (segment.isTag()) {
       markdown += `#${segment.tag?.tag}`;
     } else {
@@ -274,7 +280,9 @@ export function escapeXml(unsafe: string): string {
 }
 
 /**
- * Parse a Bluesky web URL and extract the handle and rkey
+ * Parse a Bluesky web URL and extract the handle and rkey.
+ * Works with any AT Protocol-compatible web frontend (bsky.app,
+ * blacksky.community, custom instances, etc.).
  * @param url The Bluesky web URL (e.g., https://bsky.app/profile/username.bsky.social/post/postid)
  * @returns An object containing the handle and rkey, or null if the URL is invalid
  */
@@ -283,8 +291,9 @@ export function parseBskyUrl(url: string): { handle: string, rkey: string } | nu
     // Remove any @ prefix if provided
     const cleanUrl = url.trim().replace(/^@/, '');
     
-    // Match patterns like https://bsky.app/profile/username.bsky.social/post/postid
-    const regex = /https?:\/\/bsky\.app\/profile\/([^\/]+)\/post\/([^\/\?#]+)/;
+    // Match patterns like https://<domain>/profile/<handle>/post/<rkey>
+    // Accept any domain — bsky.app, blacksky.community, or any custom frontend.
+    const regex = /https?:\/\/[^\/]+\/profile\/([^\/]+)\/post\/([^\/\?#]+)/;
     const match = cleanUrl.match(regex);
     
     if (!match) return null;

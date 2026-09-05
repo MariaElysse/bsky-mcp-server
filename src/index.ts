@@ -41,7 +41,11 @@ registerTools(server, () => agent);
 async function initializeBlueskyConnection() {
   const identifier = process.env.BLUESKY_IDENTIFIER;
   const password = process.env.BLUESKY_APP_PASSWORD;
-  const service = process.env.BLUESKY_SERVICE_URL || "https://bsky.social";
+  const service = process.env.BLUESKY_SERVICE_URL;
+  if (!service) {
+    console.error("Error: BLUESKY_SERVICE_URL environment variable must be set (e.g., https://bsky.social or https://your-custom-pds.example.com)");
+    return false;
+  }
 
   if (!identifier || !password) {
     console.error("Error: BLUESKY_IDENTIFIER and BLUESKY_APP_PASSWORD environment variables must be set");
