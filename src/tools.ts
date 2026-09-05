@@ -235,25 +235,49 @@ export function registerTools(server: McpServer, getAgent: AgentProvider): void 
           }
 
           const { notifications, cursor } = response.data;
-          allNotifications = allNotifications.concat(notifications);
-          nextCursor = cursor;
+            allNotifications = allNotifications.concat(notifications);
+            nextCursor = cursor;
 
-          // Stop if we have enough or no more results
-          shouldContinueFetching = allNotifications.length < limit && !!cursor;
-        }
+            // Stop if we have enough or no more results
+            shouldContinueFetching = allNotifications.length < limit && !!cursor;
+          }
 
-        // Limit to requested count
-        const finalNotifications = allNotifications.slice(0, limit);
+          // Limit to requested count
+          const finalNotifications = allNotifications.slice(0, limit);
 
-        if (finalNotifications.length === 0) {
-          const filterDesc = reasons ? ` with filter: ${reasons.join(', ')}` : '';
-          return mcpSuccessResponse(`No notifications found${filterDesc}.`);
-        }
+          if (finalNotifications.length === 0) {
+            const filterDesc = reasons ? ` with filter: ${reasons.join(', ')}` : '';
+            return mcpSuccessResponse(`No notifications found${filterDesc}.`);
+          }
 
-        // Format notifications output
-        let output = `Retrieved ${finalNotifications.length} notification(s):\n\n`;
+          // Enforce AI preferences: filter out notifications from users who deny inference/training
+          const notifDids = Array.from(new Set(
+            finalNotifications.map(n => n?.author?.did).filter(Boolean)
+          ));
+          const allowedMap = await batchCheckAiPreferences(agent as any, notifDids);
+          const filteredNotifications = finalNotifications.filter(n => {
+            const authorDid = n?.author?.did;
+            if (!authorDid) return true;
+            return allowedMap.get(authorDid) !== false;
+          });
+          const excludedCount = finalNotifications.length - filteredNotifications.length;
 
-        for (const notif of finalNotifications) {
+          if (filteredNotifications.length === 0) {
+            const filterDesc = reasons ? ` with filter: ${reasons.join(', ')}` : '';
+            let msg = `No notifications found${filterDesc}.`;
+            if (excludedCount > 0) {
+              msg += ` [${excludedCount} notification(s) hidden due to your AI preferences]`;
+            }
+            return mcpSuccessResponse(msg);
+          }
+
+          // Format notifications output
+          let output = `Retrieved ${filteredNotifications.length} notification(s):\n\n`;
+          if (excludedCount > 0) {
+            output += `[${excludedCount} notification(s) hidden due to your AI preferences]\n\n`;
+          }
+
+          for (const notif of filteredNotifications) {
           const displayName = notif.author.displayName || notif.author.handle;
           output += `[${notif.reason.toUpperCase()}] ${displayName} (@${notif.author.handle})\n`;
           output += `  URI: ${notif.uri}\n`;
