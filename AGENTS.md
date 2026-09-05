@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects to [Bluesky](https://bsky.app/) via the ATProtocol. It exposes 25 tools for LLM applications to interact with Bluesky — reading timelines, searching posts, managing follows, and more.
+This is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects to [Bluesky](https://bsky.app/) via the ATProtocol. It exposes 28 tools for LLM applications to interact with Bluesky — reading timelines, searching posts, managing follows, and more.
 
 **Stack**: TypeScript (ESM), Node.js, `@atproto/api`, `@modelcontextprotocol/sdk`
 **Package manager**: pnpm (`packageManager: pnpm@9.15.4`)
@@ -13,10 +13,13 @@ This is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) serve
 ```
 src/
   index.ts              # Main entry point — stdio server setup + remote OAuth tools
-  tools.ts              # Core Bluesky API tool implementations (22 tools)
+  tools.ts              # Core Bluesky API tool implementations (25 tools)
   ai-preferences.ts     # AI preference reading, caching, and post filtering
+  ai-label-filter.ts    # AI label detection: post-level no-AI hashtags, self-applied labels, profile bio declarations
   link-preview.ts       # Link preview metadata fetching & thumbnail upload
   llm-preprocessor.ts   # Post/thread formatting for LLM consumption
+  mention-store.ts      # Persistent mention deduplication store (JSON file backend)
+  thread-context.ts     # Thread context retrieval and formatting
   prompts.ts            # Prompt templates
   resources.ts          # MCP resource definitions
   utils.ts              # Shared utilities (handle cleaning, URI validation, etc.)
@@ -36,8 +39,11 @@ deploy/                 # Deployment artifacts (systemd, Caddyfile)
 | File | Purpose |
 |------|---------|
 | `src/index.ts` | Main entry point. Registers stdio MCP server + remote OAuth tools. ~1600 lines. |
-| `src/tools.ts` | Core tool implementations (get-timeline-posts, search-posts, create-post, etc.). ~1700 lines. |
+| `src/tools.ts` | Core tool implementations (get-timeline-posts, search-posts, create-post, etc.). ~2000 lines. |
 | `src/ai-preferences.ts` | AI preference system: reads/writes `community.lexicon.preference.ai` records, caches per-DID, filters posts. |
+| `src/ai-label-filter.ts` | AI label detection layer: post-level no-AI hashtags, self-applied labels, profile bio declarations. |
+| `src/mention-store.ts` | Persistent mention deduplication store with JSON file backend. |
+| `src/thread-context.ts` | Thread context retrieval and formatting for mention context tool. |
 | `src/utils.ts` | Shared helpers: `cleanHandle()`, `validateUri()`, `convertBskyUrlToAtUri()`, response formatters. |
 | `src/llm-preprocessor.ts` | Formats raw Bluesky API responses into LLM-friendly text (POST_FORMAT_SPEC). |
 
@@ -87,8 +93,9 @@ pnpm run test:link-preview   # Link preview test
 
 - Tests are plain Node.js ESM scripts in `test/` (not Jest/Mocha)
 - Each test file is self-contained and runs against the built output in `build/test/`
-- The orchestrator (`test/final-test.ts`) runs all 4 suites sequentially
-- Tests verify tool registration, remote OAuth flow, post-thread formatting, URL conversion, and link preview
+- The orchestrator (`test/final-test.ts`) runs all test suites sequentially
+- Test files: `register-tools.test.ts`, `remote-oauth.test.ts`, `thread-context.test.ts`, `mention-context.test.ts`, `mention-monitor.test.ts`, `mention-store.test.ts`, `ai-preferences.test.ts`, `ai-preferences-tombstone.test.ts`, `create-reply.test.ts`
+- Tests verify tool registration, remote OAuth flow, thread context retrieval, mention management, AI preferences, and link preview
 
 ## AI Preference System
 

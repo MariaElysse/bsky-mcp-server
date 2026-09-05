@@ -34,6 +34,7 @@ Here's the current list of tools provided:
 
 ### Post & Thread Tools
 - **create-post**: Publishes a new post to Bluesky. Supports replies, link previews (auto-detected or specified), and automatic facet detection (mentions, hashtags).
+- **create-reply**: Creates a reply to an existing Bluesky post. Resolves root/parent CID references automatically, checks AI preferences of the target author, and deduplicates against previously handled mentions.
 - **get-post-thread**: Returns a full conversation thread for a specific post, showing all replies and context up to configurable depth/parent height.
 - **like-post**: Likes a post with a specific URI.
 - **unfollow-user**: Unfollows a specific user.
@@ -58,6 +59,10 @@ Here's the current list of tools provided:
 ### AI Preference Tools
 - **get-ai-preferences**: Retrieves the current user's AI preferences (community.lexicon.preference.ai record), which control whether content from specific users may be read based on categories like inference, training, synthetic content, and embedding.
 - **set-ai-preference**: Sets or updates a category in the user's AI preferences record.
+
+### Mention Management Tools
+- **get-mention-context**: Fetches recent mentions of the authenticated user with full conversation thread context and AI preference filtering.
+- **run-mention-monitor**: Monitors incoming mentions and can auto-reply. Uses a persistent mention store for deduplication and tracks handled mentions to avoid duplicate responses.
 
 ## Tips
 - You can ask for posts from search, timelines, lists, feeds, or profiles by time range. For example: "Summarize posts from my timeline for the last three days" or "Find me the most interesting article people have been talking about this week".
