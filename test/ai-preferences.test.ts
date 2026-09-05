@@ -505,6 +505,24 @@ async function testIntegrationGetUserPostsEnforcesPrefs() {
   );
 }
 
+async function testIntegrationGetNotificationsEnforcesPrefs() {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const toolsPath = path.join(
+    process.cwd(),
+    "build",
+    "src",
+    "tools.js"
+  );
+  const src = fs.readFileSync(toolsPath, "utf-8");
+
+  // get-notifications should call batchCheckAiPreferences to enforce AI preferences
+  assert.ok(
+    src.includes("batchCheckAiPreferences"),
+    "get-notifications should enforce AI preferences via batchCheckAiPreferences"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // (8) Edge cases: malformed input, empty arrays, fetch failures
 // ---------------------------------------------------------------------------
@@ -629,6 +647,10 @@ async function main() {
     [
       "integration: get-user-posts enforces prefs",
       testIntegrationGetUserPostsEnforcesPrefs,
+    ],
+    [
+      "integration: get-notifications enforces prefs",
+      testIntegrationGetNotificationsEnforcesPrefs,
     ],
 
     // (8) Edge cases
