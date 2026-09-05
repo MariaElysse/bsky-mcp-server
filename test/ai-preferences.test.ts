@@ -377,34 +377,35 @@ async function testFilterThreadUndefinedAllowed() {
 
 async function testIntegrationTimelineEnforcesPrefs() {
   // Verify the get-timeline-posts tool source contains AI preference filtering.
+  // After deduplication, tool implementations live in tools.js (canonical source).
   const fs = await import("node:fs");
   const path = await import("node:path");
-  const indexPath = path.join(
+  const toolsPath = path.join(
     process.cwd(),
     "build",
     "src",
-    "index.js"
+    "tools.js"
   );
-  const src = fs.readFileSync(indexPath, "utf-8");
+  const src = fs.readFileSync(toolsPath, "utf-8");
 
   // The tool should reference batchCheckAiPreferences or filterPostsByAiPrefs
   assert.ok(
     src.includes("batchCheckAiPreferences") ||
       src.includes("filterPostsByAiPreferences"),
-    "index.js should contain AI preference checking calls"
+    "tools.js should contain AI preference checking calls"
   );
 }
 
 async function testIntegrationSearchPostsEnforcesPrefs() {
   const fs = await import("node:fs");
   const path = await import("node:path");
-  const indexPath = path.join(
+  const toolsPath = path.join(
     process.cwd(),
     "build",
     "src",
-    "index.js"
+    "tools.js"
   );
-  const src = fs.readFileSync(indexPath, "utf-8");
+  const src = fs.readFileSync(toolsPath, "utf-8");
 
   // search-posts tool should call filterPostsByAiPrefs
   assert.ok(
@@ -416,13 +417,13 @@ async function testIntegrationSearchPostsEnforcesPrefs() {
 async function testIntegrationGetPostThreadEnforcesPrefs() {
   const fs = await import("node:fs");
   const path = await import("node:path");
-  const indexPath = path.join(
+  const toolsPath = path.join(
     process.cwd(),
     "build",
     "src",
-    "index.js"
+    "tools.js"
   );
-  const src = fs.readFileSync(indexPath, "utf-8");
+  const src = fs.readFileSync(toolsPath, "utf-8");
 
   // get-post-thread should use formatPostThreadWithAiPrefs or filterThreadByAiPreferences
   assert.ok(
@@ -435,13 +436,13 @@ async function testIntegrationGetPostThreadEnforcesPrefs() {
 async function testIntegrationGetLikedPostsEnforcesPrefs() {
   const fs = await import("node:fs");
   const path = await import("node:path");
-  const indexPath = path.join(
+  const toolsPath = path.join(
     process.cwd(),
     "build",
     "src",
-    "index.js"
+    "tools.js"
   );
-  const src = fs.readFileSync(indexPath, "utf-8");
+  const src = fs.readFileSync(toolsPath, "utf-8");
 
   // get-liked-posts should enforce AI preferences
   assert.ok(
@@ -453,13 +454,13 @@ async function testIntegrationGetLikedPostsEnforcesPrefs() {
 async function testIntegrationGetFeedPostsEnforcesPrefs() {
   const fs = await import("node:fs");
   const path = await import("node:path");
-  const indexPath = path.join(
+  const toolsPath = path.join(
     process.cwd(),
     "build",
     "src",
-    "index.js"
+    "tools.js"
   );
-  const src = fs.readFileSync(indexPath, "utf-8");
+  const src = fs.readFileSync(toolsPath, "utf-8");
 
   // get-feed-posts should enforce AI preferences
   assert.ok(
@@ -471,13 +472,13 @@ async function testIntegrationGetFeedPostsEnforcesPrefs() {
 async function testIntegrationGetListPostsEnforcesPrefs() {
   const fs = await import("node:fs");
   const path = await import("node:path");
-  const indexPath = path.join(
+  const toolsPath = path.join(
     process.cwd(),
     "build",
     "src",
-    "index.js"
+    "tools.js"
   );
-  const src = fs.readFileSync(indexPath, "utf-8");
+  const src = fs.readFileSync(toolsPath, "utf-8");
 
   // get-list-posts should enforce AI preferences
   assert.ok(
@@ -489,13 +490,13 @@ async function testIntegrationGetListPostsEnforcesPrefs() {
 async function testIntegrationGetUserPostsEnforcesPrefs() {
   const fs = await import("node:fs");
   const path = await import("node:path");
-  const indexPath = path.join(
+  const toolsPath = path.join(
     process.cwd(),
     "build",
     "src",
-    "index.js"
+    "tools.js"
   );
-  const src = fs.readFileSync(indexPath, "utf-8");
+  const src = fs.readFileSync(toolsPath, "utf-8");
 
   // get-user-posts should enforce AI preferences
   assert.ok(
