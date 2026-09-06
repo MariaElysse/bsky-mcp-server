@@ -59,7 +59,6 @@ Here's the current list of tools provided:
 - **set-ai-preference**: Sets or updates a category in the user's AI preferences record.
 
 ### Mention Management Tools
-- **get-mention-context**: Fetches recent mentions of the authenticated user with full conversation thread context and AI preference filtering.
 - **run-mention-monitor**: Monitors incoming mentions and can auto-reply. Uses a persistent mention store for deduplication and tracks handled mentions to avoid duplicate responses.
 
 ## Tips
@@ -122,15 +121,16 @@ This server also supports a remote HTTP mode with OAuth authentication. Instead 
 
 ```bash
 # Start the remote OAuth server
-pnpm run start:remote
+PUBLIC_URL=http://localhost:8787 node build/src/remote/index.js
 ```
 
 Environment variables for remote mode:
-- `REMOTE_HOST`: Host to bind (default: localhost)
-- `REMOTE_PORT`: Port to listen on (default: 3000)
-- `SERVICE_URL`: Bluesky AT Protocol service URL
-- `CLIENT_ID`: OAuth client ID (registered with Bluesky)
-- `CLIENT_SECRET`: OAuth client secret
+- `PUBLIC_URL`: Public-facing URL of this server (required)
+- `DATA_DIR`: Directory for persistent data (default: `/var/lib/bsky-mcp`)
+- `SIGNING_KEY_PATH`: Path to OAuth signing keys (default: `$DATA_DIR/signing-keys.json`)
+- `DB_PATH`: Path to the SQLite database (default: `$DATA_DIR/data.db`)
+- `PORT`: Port to listen on (default: 8787)
+- `HOST`: Host to bind (default: 127.0.0.1)
 
 ## Creating App Passwords
 
