@@ -36,7 +36,8 @@ async function main() {
     ["thread-context", `node build/test/thread-context.test.js`],
     ["mention-context", `node build/test/mention-context.test.js`],
     ["mention-monitor", `node build/test/mention-monitor.test.js`],
-    ["create-reply", `node build/test/create-reply.test.js`],
+    ["create-reply", "node build/test/create-reply.test.js"],
+    ["custom-endpoint", "node build/test/custom-endpoint/test-custom-endpoint.js"],
   ];
 
   const results = [];
