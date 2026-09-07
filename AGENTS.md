@@ -125,6 +125,8 @@ When modifying content-fetching tools, ensure they respect AI preferences via `b
 3. **AI preferences are mandatory**: Any tool that fetches user content (posts, timelines, searches) must filter by AI preferences. No exceptions.
 4. **Windows compatibility**: The build script includes a Windows-specific chmod workaround. Don't remove it.
 5. **ESM only**: This project uses `"type": "module"` in package.json. Use `.js` extensions in imports.
+6. **Git trailer.** Every commit must include the trailer:
+   `Assisted-by: <model_name> via Hermes Agent`
 
 ## Adding a New Tool — Checklist
 
@@ -142,3 +144,10 @@ The server supports a secondary HTTP mode for scenarios where stdio isn't practi
 - Handles Bluesky OAuth dance automatically
 - Persists sessions/tokens via `src/remote/storage.ts`
 - Exposes the same tools over HTTP with JWT authentication
+
+## Branching Workflow
+
+- Pull from origin/main and merge upstream changes before starting work
+- `main` -- stable baseline. Always keep up-to-date with origin/main
+- Worktree branches (`wt/t_<task_id>`) -- isolated branches for kanban tasks.
+- Merges happen via the kanban board workflow.
