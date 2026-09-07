@@ -5,7 +5,7 @@
   "main": "build/src/index.js",
   "type": "module",
   "scripts": {
-    "build": "tsc && if not exist build\\test mkdir build\\test",
+    "build": "tsc && node -e \"require('fs').mkdirSync('build/test', {recursive: true})\"",
     "start": "node build/src/index.js",
     "dev": "tsc && node build/src/index.js",
     "test": "pnpm run build && node build/test/final-test.js",
@@ -21,7 +21,7 @@
   ],
   "author": "Brian Ellin",
   "license": "MIT",
-  "packageManager": "pnpm@12",
+  "packageManager": "pnpm@12.3.4",
   "dependencies": {
     "@atproto/api": "^0.14.9",
     "@modelcontextprotocol/sdk": "^1.7.0",
