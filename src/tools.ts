@@ -99,94 +99,120 @@ export function registerTools(server: McpServer, getAgent: AgentProvider): void 
 
   server.tool(
     "get-timeline-posts",
-    "Fetch your home timeline from Bluesky, which includes posts from all of the people you follow in reverse chronological order",
+    "Fetch your home timeline from Bluesky, which includes posts from all of the people you follow in reverse chronological order. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page.",
     {
-      count: z.number().min(1).max(500).describe("Number of posts to fetch or hours to look back"),
-      type: z.enum(["posts", "hours"]).describe("Whether count represents number of posts or hours to look back")
+      count: z.number().min(1).max(500).default(20).describe("Number of posts to fetch (1-500). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
+      type: z.enum(["posts", "hours"]).default("posts").describe("Whether count represents number of posts or hours to look back. In cursor mode, only 'posts' is supported."),
+      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'.")
     },
-    async ({ count, type }) => {
+    async ({ count, type, cursor }) => {
       try {
         const agent = getAgent();
         if (!agent) {
           return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
         }
 
-        const MAX_TOTAL_POSTS = 500; // Safety limit to prevent excessive API calls
+        // Cursor mode: fetch a single page starting from the cursor.
+        // Time-based mode does not support cursor (time window is relative to now).
+        const isCursorMode = !!cursor && type === "posts";
 
         let allPosts: any[] = [];
         let nextCursor: string | undefined = undefined;
-        let shouldContinueFetching = true;
+        let pageFetchCount = 0;
 
-        // Set up time-based or count-based fetching
-        const useHoursLimit = type === "hours";
-        const targetHours = count;
-        const targetDate = new Date(Date.now() - targetHours * 60 * 60 * 1000);
-
-        while (shouldContinueFetching && allPosts.length < MAX_TOTAL_POSTS) {
-          // Calculate how many posts to fetch in this batch
-          const batchLimit = 100;
-
+        if (isCursorMode) {
+          // Single-page fetch starting from the cursor
           const response = await agent.getTimeline({
-            limit: batchLimit,
-            cursor: nextCursor
+            limit: count,
+            cursor: cursor
           });
 
-          if (!response.success) {
-            break;
+          if (response.success) {
+            allPosts = response.data.feed;
+            nextCursor = response.data.cursor;
           }
+        } else {
+          // Auto-paginate: fetch posts until we have enough or run out
+          const MAX_TOTAL_POSTS = 500;
+          let shouldContinueFetching = true;
+          let pageFetchCount = 0;
 
-          const { feed, cursor } = response.data;
+          // Set up time-based or count-based fetching
+          const useHoursLimit = type === "hours";
+          const targetHours = count;
+          const targetDate = new Date(Date.now() - targetHours * 60 * 60 * 1000);
 
-          // Filter posts based on time window if using hours limit
-          let filteredFeed = feed;
-          if (useHoursLimit) {
-            filteredFeed = feed.filter(post => {
-              const createdAt = post?.post?.record?.createdAt;
-              if (!createdAt || typeof createdAt !== 'string') return false;
-              const postDate = new Date(createdAt);
-              return postDate >= targetDate;
+          while (shouldContinueFetching && allPosts.length < MAX_TOTAL_POSTS) {
+            // Cap batch at 100 (API page size) but also respect remaining count
+            const batchLimit = Math.min(100, count - allPosts.length);
+
+            const response = await agent.getTimeline({
+              limit: batchLimit,
+              cursor: nextCursor
             });
-          }
 
-          // Add the filtered posts to our collection
-          allPosts = allPosts.concat(filteredFeed);
-
-          // Update cursor for the next batch
-          nextCursor = cursor;
-
-          // Check if we should continue fetching based on the mode
-          if (useHoursLimit) {
-            // Check if we've reached posts older than our target date
-            const oldestPost = feed[feed.length - 1];
-            if (oldestPost?.post?.record?.createdAt && typeof oldestPost.post.record.createdAt === 'string') {
-              const postDate = new Date(oldestPost.post.record.createdAt);
-              if (postDate < targetDate) {
-                shouldContinueFetching = false;
-              }
+            if (!response.success) {
+              break;
             }
-          } else {
-            // If we're using count-based fetching, stop when we have enough posts
-            shouldContinueFetching = allPosts.length < count;
+
+            const { feed, cursor: pageCursor } = response.data;
+            pageFetchCount++;
+
+            // Filter posts based on time window if using hours limit
+            let filteredFeed = feed;
+            if (useHoursLimit) {
+              filteredFeed = feed.filter(post => {
+                const createdAt = post?.post?.record?.createdAt;
+                if (!createdAt || typeof createdAt !== 'string') return false;
+                const postDate = new Date(createdAt);
+                return postDate >= targetDate;
+              });
+            }
+
+            allPosts = allPosts.concat(filteredFeed);
+            nextCursor = pageCursor;
+
+            // Time-based: stop when we've gone past the target date
+            if (useHoursLimit) {
+              const oldestPost = feed[feed.length - 1];
+              if (oldestPost?.post?.record?.createdAt && typeof oldestPost.post.record.createdAt === 'string') {
+                const postDate = new Date(oldestPost.post.record.createdAt);
+                if (postDate < targetDate) {
+                  shouldContinueFetching = false;
+                }
+              }
+            } else {
+              // Count-based: stop when we have enough
+              shouldContinueFetching = allPosts.length < count;
+            }
+
+            if (!pageCursor) {
+              shouldContinueFetching = false;
+            }
           }
 
-          // Stop if we don't have a cursor for the next page
-          if (!cursor) {
-            shouldContinueFetching = false;
+          // Limit to requested count for count-based mode
+          if (!useHoursLimit) {
+            allPosts = allPosts.slice(0, count);
           }
         }
 
-        // If we're using count-based fetching, limit the posts to the requested count
-        const finalPosts = !useHoursLimit
-          ? allPosts.slice(0, count)
-          : allPosts;
-
-        if (finalPosts.length === 0) {
-          return mcpSuccessResponse("Your timeline is empty.");
+        if (allPosts.length === 0) {
+          return mcpSuccessResponse(isCursorMode ? "No more timeline posts available." : "Your timeline is empty.");
         }
 
         // Enforce AI preferences: filter out content from users who deny inference/training
-        const result = await filterPostsByAiPrefs(agent, finalPosts, "timeline");
-        return mcpSuccessResponse(result.text);
+        const result = await filterPostsByAiPrefs(agent, allPosts, "timeline");
+        let responseText = result.text;
+
+        // Expose cursor for pagination when more results may be available
+        // Only signal in cursor mode (explicit page request) or if we fetched multiple pages
+        // (meaning the API has more pages beyond what we fetched)
+        if (nextCursor && allPosts.length > 0 && (isCursorMode || pageFetchCount > 1)) {
+          responseText += `\n\n[More timeline posts available — pass cursor="${nextCursor}" to continue.]`;
+        }
+
+        return mcpSuccessResponse(responseText);
 
       } catch (error) {
         return mcpErrorResponse(`Error fetching timeline: ${error instanceof Error ? error.message : String(error)}`);
@@ -196,9 +222,9 @@ export function registerTools(server: McpServer, getAgent: AgentProvider): void 
 
   server.tool(
     "get-notifications",
-    "Fetch your notifications from Bluesky, optionally filtered by type (reply, mention, like, repost, follow, quote)",
+    "Fetch your notifications from Bluesky, optionally filtered by type (reply, mention, like, repost, follow, quote). Supports cursor-based pagination: omit `cursor` to auto-fetch up to `limit` notifications, or pass a cursor from a previous response to fetch the next page.",
     {
-      limit: z.number().min(1).max(500).default(50).describe("Number of notifications to fetch (1-500)"),
+      limit: z.number().min(1).max(500).default(20).describe("Maximum number of notifications to fetch (1-500). When cursor is provided, this is the max notifications returned from that page; when omitted, fetches up to this many notifications."),
       reasons: z.array(z.enum([
         "like",
         "repost",
@@ -207,89 +233,120 @@ export function registerTools(server: McpServer, getAgent: AgentProvider): void 
         "reply",
         "quote",
         "starterpack-joined"
-      ])).optional().describe("Filter by notification types (e.g., ['reply', 'mention']). If not provided, returns all types.")
+      ])).optional().describe("Filter by notification types (e.g., ['reply', 'mention']). If not provided, returns all types."),
+      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call.")
     },
-    async ({ limit, reasons }) => {
+    async ({ limit, reasons, cursor }) => {
       const agent = getAgent();
       if (!agent) {
         return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
       }
 
       try {
-        const MAX_NOTIFICATIONS = 500; // Safety limit
+        // Cursor mode: fetch a single page starting from the cursor.
+        const isCursorMode = !!cursor;
+
         let allNotifications: any[] = [];
         let nextCursor: string | undefined = undefined;
-        let shouldContinueFetching = true;
+        let pageFetchCount = 0;
 
-        while (shouldContinueFetching && allNotifications.length < MAX_NOTIFICATIONS) {
-          const batchLimit = Math.min(100, limit - allNotifications.length);
-
+        if (isCursorMode) {
+          // Single-page fetch starting from the cursor
           const response = await agent.app.bsky.notification.listNotifications({
-            limit: batchLimit,
-            cursor: nextCursor,
+            limit: limit,
+            cursor: cursor,
             reasons: reasons
           });
 
-          if (!response.success) {
-            break;
+          if (response.success) {
+            allNotifications = response.data.notifications;
+            nextCursor = response.data.cursor;
           }
+        } else {
+          // Auto-paginate: fetch notifications until we have enough or run out
+          const MAX_NOTIFICATIONS = 500;
+          let pageFetchCount = 0;
 
-          const { notifications, cursor } = response.data;
+          while (allNotifications.length < MAX_NOTIFICATIONS) {
+            const batchLimit = Math.min(100, limit - allNotifications.length);
+
+            const response = await agent.app.bsky.notification.listNotifications({
+              limit: batchLimit,
+              cursor: nextCursor,
+              reasons: reasons
+            });
+
+            if (!response.success) {
+              break;
+            }
+
+            const { notifications, cursor: pageCursor } = response.data;
+            pageFetchCount++;
             allNotifications = allNotifications.concat(notifications);
-            nextCursor = cursor;
+            nextCursor = pageCursor;
 
             // Stop if we have enough or no more results
-            shouldContinueFetching = allNotifications.length < limit && !!cursor;
-          }
-
-          // Limit to requested count
-          const finalNotifications = allNotifications.slice(0, limit);
-
-          if (finalNotifications.length === 0) {
-            const filterDesc = reasons ? ` with filter: ${reasons.join(', ')}` : '';
-            return mcpSuccessResponse(`No notifications found${filterDesc}.`);
-          }
-
-          // Enforce AI preferences: filter out notifications from users who deny inference/training
-          const notifDids = Array.from(new Set(
-            finalNotifications.map(n => n?.author?.did).filter(Boolean)
-          ));
-          const allowedMap = await batchCheckAiPreferences(agent as any, notifDids);
-          const filteredNotifications = finalNotifications.filter(n => {
-            const authorDid = n?.author?.did;
-            if (!authorDid) return true;
-            return allowedMap.get(authorDid) !== false;
-          });
-          const excludedCount = finalNotifications.length - filteredNotifications.length;
-
-          if (filteredNotifications.length === 0) {
-            const filterDesc = reasons ? ` with filter: ${reasons.join(', ')}` : '';
-            let msg = `No notifications found${filterDesc}.`;
-            if (excludedCount > 0) {
-              msg += ` [${excludedCount} notification(s) hidden due to your AI preferences]`;
+            if (!pageCursor || allNotifications.length >= limit) {
+              break;
             }
-            return mcpSuccessResponse(msg);
           }
-
-          // Format notifications output
-          let output = `Retrieved ${filteredNotifications.length} notification(s):\n\n`;
-          if (excludedCount > 0) {
-            output += `[${excludedCount} notification(s) hidden due to your AI preferences]\n\n`;
-          }
-
-          for (const notif of filteredNotifications) {
-          const displayName = notif.author.displayName || notif.author.handle;
-          output += `[${notif.reason.toUpperCase()}] ${displayName} (@${notif.author.handle})\n`;
-          output += `  URI: ${notif.uri}\n`;
-          output += `  Time: ${notif.indexedAt}\n`;
-          output += `  Read: ${notif.isRead}\n`;
-          if (notif.reasonSubject) {
-            output += `  Subject: ${notif.reasonSubject}\n`;
-          }
-          output += `\n`;
         }
 
-        return mcpSuccessResponse(output);
+        // Limit to requested count for auto-paginate mode
+        const finalNotifications = isCursorMode ? allNotifications : allNotifications.slice(0, limit);
+
+        if (finalNotifications.length === 0) {
+          const filterDesc = reasons ? ` with filter: ${reasons.join(', ')}` : '';
+          return mcpSuccessResponse(isCursorMode ? "No more notifications available." : `No notifications found${filterDesc}.`);
+        }
+
+        // Enforce AI preferences: filter out notifications from users who deny inference/training
+        const notifDids = Array.from(new Set(
+          finalNotifications.map(n => n?.author?.did).filter(Boolean)
+        ));
+        const allowedMap = await batchCheckAiPreferences(agent as any, notifDids);
+        const filteredNotifications = finalNotifications.filter(n => {
+          const authorDid = n?.author?.did;
+          if (!authorDid) return true;
+          return allowedMap.get(authorDid) !== false;
+        });
+        const excludedCount = finalNotifications.length - filteredNotifications.length;
+
+        if (filteredNotifications.length === 0) {
+          const filterDesc = reasons ? ` with filter: ${reasons.join(', ')}` : '';
+          let msg = isCursorMode ? "No more notifications available." : `No notifications found${filterDesc}.`;
+          if (excludedCount > 0) {
+            msg += ` [${excludedCount} notification(s) hidden due to your AI preferences]`;
+          }
+          return mcpSuccessResponse(msg);
+        }
+
+        // Format notifications output
+        let output = `Retrieved ${filteredNotifications.length} notification(s):\n\n`;
+        if (excludedCount > 0) {
+          output += `[${excludedCount} notification(s) hidden due to your AI preferences]\n\n`;
+        }
+
+        for (const notif of filteredNotifications) {
+        const displayName = notif.author.displayName || notif.author.handle;
+        output += `[${notif.reason.toUpperCase()}] ${displayName} (@${notif.author.handle})\n`;
+        output += `  URI: ${notif.uri}\n`;
+        output += `  Time: ${notif.indexedAt}\n`;
+        output += `  Read: ${notif.isRead}\n`;
+        if (notif.reasonSubject) {
+          output += `  Subject: ${notif.reasonSubject}\n`;
+        }
+        output += `\n`;
+      }
+
+      let responseText = output;
+      // Expose cursor for pagination when more results may be available
+      // Only signal in cursor mode or if we fetched multiple pages
+      if (nextCursor && filteredNotifications.length > 0 && (isCursorMode || pageFetchCount > 1)) {
+        responseText += `\n[More notifications available — pass cursor="${nextCursor}" to continue.]`;
+      }
+
+      return mcpSuccessResponse(responseText);
       } catch (error) {
         return mcpErrorResponse(`Error fetching notifications: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -653,11 +710,12 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
 
   server.tool(
     "get-liked-posts",
-    "Get a list of posts that the authenticated user has liked",
+    "Get a list of posts that the authenticated user has liked. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `limit` posts, or pass a cursor from a previous response to fetch the next page.",
     {
-      limit: z.number().min(1).max(100).default(50).describe("Maximum number of liked posts to fetch (1-100)"),
+      limit: z.number().min(1).max(100).default(20).describe("Maximum number of liked posts to fetch (1-100). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
+      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call.")
     },
-    async ({ limit }) => {
+    async ({ limit, cursor }) => {
       const agent = getAgent();
       if (!agent) {
         return mcpErrorResponse("Not logged in. Please check your environment variables.");
@@ -671,56 +729,75 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
 
         const authenticatedUser = agent.did;
 
-        // Now fetch the authenticated user's likes with pagination
-        const MAX_BATCH_SIZE = 100; // Maximum number of likes per API call
-        const MAX_BATCHES = 5;      // Maximum number of API calls to make (100 x 5 = 500)
+        // Cursor mode: fetch a single page starting from the cursor.
+        const isCursorMode = !!cursor;
+
         let allLikes: any[] = [];
         let nextCursor: string | undefined = undefined;
-        let batchCount = 0;
+        let pageFetchCount = 0;
 
-        // Loop to fetch likes with pagination
-        while (batchCount < MAX_BATCHES && allLikes.length < limit) {
-          // Calculate how many likes to fetch in this batch
-          const batchLimit = Math.min(MAX_BATCH_SIZE, limit - allLikes.length);
-
-          // Make the API call with cursor if we have one
+        if (isCursorMode) {
+          // Single-page fetch starting from the cursor
           const response = await agent.app.bsky.feed.getActorLikes({
             actor: authenticatedUser,
-            limit: batchLimit,
-            cursor: nextCursor || undefined
+            limit: limit,
+            cursor: cursor
           });
 
-          if (!response.success) {
-            // If we've already fetched some likes, return those
-            if (allLikes.length > 0) {
+          if (response.success) {
+            allLikes = response.data.feed;
+            nextCursor = response.data.cursor;
+          }
+        } else {
+          // Auto-paginate: fetch likes until we have enough or run out
+          const MAX_BATCH_SIZE = 100;
+          const MAX_BATCHES = 5;
+          let batchCount = 0;
+          let pageFetchCount = 0;
+
+          while (batchCount < MAX_BATCHES && allLikes.length < limit) {
+            const batchLimit = Math.min(MAX_BATCH_SIZE, limit - allLikes.length);
+
+            const response = await agent.app.bsky.feed.getActorLikes({
+              actor: authenticatedUser,
+              limit: batchLimit,
+              cursor: nextCursor || undefined
+            });
+
+            if (!response.success) {
+              if (allLikes.length > 0) {
+                break;
+              }
+              return mcpErrorResponse(`Failed to fetch your likes.`);
+            }
+
+            const { feed, cursor: pageCursor } = response.data;
+            pageFetchCount++;
+            allLikes = allLikes.concat(feed);
+            nextCursor = pageCursor;
+            batchCount++;
+
+            if (!pageCursor || allLikes.length >= limit) {
               break;
             }
-            return mcpErrorResponse(`Failed to fetch your likes.`);
-          }
-
-          const { feed, cursor } = response.data;
-
-          // Add the fetched likes to our collection
-          allLikes = allLikes.concat(feed);
-
-          // Update cursor for the next batch
-          nextCursor = cursor;
-          batchCount++;
-
-          // If no cursor returned or we've reached our limit, stop paginating
-          if (!cursor || allLikes.length >= limit) {
-            break;
           }
         }
 
         if (allLikes.length === 0) {
-          return mcpSuccessResponse(`You haven't liked any posts.`);
+          return mcpSuccessResponse(isCursorMode ? "No more liked posts available." : `You haven't liked any posts.`);
         }
 
         // Enforce AI preferences: filter out content from users who deny inference/training
         const result = await filterPostsByAiPrefs(agent, allLikes, "liked posts");
+        let responseText = result.text;
 
-        return mcpSuccessResponse(result.text);
+        // Expose cursor for pagination when more results may be available
+        // Only signal in cursor mode or if we fetched multiple pages
+        if (nextCursor && allLikes.length > 0 && (isCursorMode || pageFetchCount > 1)) {
+          responseText += `\n\n[More liked posts available — pass cursor="${nextCursor}" to continue.]`;
+        }
+
+        return mcpSuccessResponse(responseText);
 
       } catch (error) {
         return mcpErrorResponse(`Error fetching likes: ${error instanceof Error ? error.message : String(error)}`);
@@ -1074,13 +1151,14 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
   server.tool(
     "get-feed-posts",
-    "Fetch posts from a specified feed",
+    "Fetch posts from a specified feed. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page.",
     {
       feed: z.string().describe("The URI of the feed to fetch posts from (e.g., at://did:plc:abcdef/app.bsky.feed.generator/whats-hot)"),
-      count: z.number().min(1).max(500).describe("Number of posts to fetch or hours to look back"),
-      type: z.enum(["posts", "hours"]).describe("Whether count represents number of posts or hours to look back")
+      count: z.number().min(1).max(500).default(20).describe("Number of posts to fetch (1-500). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
+      type: z.enum(["posts", "hours"]).default("posts").describe("Whether count represents number of posts or hours to look back. In cursor mode, only 'posts' is supported."),
+      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'.")
     },
-    async ({ feed, count, type }) => {
+    async ({ feed, count, type, cursor }) => {
       const agent = getAgent();
       if (!agent) {
         return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
@@ -1093,85 +1171,108 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
           return mcpErrorResponse(`Invalid feed URI or feed not found: ${feed}.`);
         }
 
-        const MAX_TOTAL_POSTS = 500; // Safety limit to prevent excessive API calls
+        // Cursor mode: fetch a single page starting from the cursor.
+        // Time-based mode does not support cursor (time window is relative to now).
+        const isCursorMode = !!cursor && type === "posts";
 
         let allPosts: any[] = [];
         let nextCursor: string | undefined = undefined;
-        let shouldContinueFetching = true;
+        let pageFetchCount = 0;
 
-        // Set up time-based or count-based fetching
-        const useHoursLimit = type === "hours";
-        const targetHours = count;
-        const targetDate = new Date(Date.now() - targetHours * 60 * 60 * 1000);
-
-        while (shouldContinueFetching && allPosts.length < MAX_TOTAL_POSTS) {
-          // Calculate how many posts to fetch in this batch
-          const batchLimit = 100;
-
+        if (isCursorMode) {
+          // Single-page fetch starting from the cursor
           const response = await agent.app.bsky.feed.getFeed({
             feed,
-            limit: batchLimit,
-            cursor: nextCursor
+            limit: count,
+            cursor: cursor
           });
 
-          if (!response.success) {
-            break;
+          if (response.success) {
+            allPosts = response.data.feed;
+            nextCursor = response.data.cursor;
           }
+        } else {
+          // Auto-paginate: fetch posts until we have enough or run out
+          const MAX_TOTAL_POSTS = 500;
+          let shouldContinueFetching = true;
+          let pageFetchCount = 0;
 
-          const { feed: feedPosts, cursor } = response.data;
+          // Set up time-based or count-based fetching
+          const useHoursLimit = type === "hours";
+          const targetHours = count;
+          const targetDate = new Date(Date.now() - targetHours * 60 * 60 * 1000);
 
-          // Filter posts based on time window if using hours limit
-          let filteredFeed = feedPosts;
-          if (useHoursLimit) {
-            filteredFeed = feedPosts.filter(post => {
-              const createdAt = post?.post?.record?.createdAt;
-              if (!createdAt || typeof createdAt !== 'string') return false;
-              const postDate = new Date(createdAt);
-              return postDate >= targetDate;
+          while (shouldContinueFetching && allPosts.length < MAX_TOTAL_POSTS) {
+            const batchLimit = Math.min(100, count - allPosts.length);
+
+            const response = await agent.app.bsky.feed.getFeed({
+              feed,
+              limit: batchLimit,
+              cursor: nextCursor
             });
-          }
 
-          // Add the filtered posts to our collection
-          allPosts = allPosts.concat(filteredFeed);
-
-          // Update cursor for the next batch
-          nextCursor = cursor;
-
-          // Check if we should continue fetching based on the mode
-          if (useHoursLimit) {
-            // Check if we've reached posts older than our target date
-            const oldestPost = feedPosts[feedPosts.length - 1];
-            if (oldestPost?.post?.record?.createdAt && typeof oldestPost.post.record.createdAt === 'string') {
-              const postDate = new Date(oldestPost.post.record.createdAt);
-              if (postDate < targetDate) {
-                shouldContinueFetching = false;
-              }
+            if (!response.success) {
+              break;
             }
-          } else {
-            // If we're using count-based fetching, stop when we have enough posts
-            shouldContinueFetching = allPosts.length < count;
+
+            const { feed: feedPosts, cursor: pageCursor } = response.data;
+            pageFetchCount++;
+
+            // Filter posts based on time window if using hours limit
+            let filteredFeed = feedPosts;
+            if (useHoursLimit) {
+              filteredFeed = feedPosts.filter(post => {
+                const createdAt = post?.post?.record?.createdAt;
+                if (!createdAt || typeof createdAt !== 'string') return false;
+                const postDate = new Date(createdAt);
+                return postDate >= targetDate;
+              });
+            }
+
+            allPosts = allPosts.concat(filteredFeed);
+            nextCursor = pageCursor;
+
+            // Time-based: stop when we've gone past the target date
+            if (useHoursLimit) {
+              const oldestPost = feedPosts[feedPosts.length - 1];
+              if (oldestPost?.post?.record?.createdAt && typeof oldestPost.post.record.createdAt === 'string') {
+                const postDate = new Date(oldestPost.post.record.createdAt);
+                if (postDate < targetDate) {
+                  shouldContinueFetching = false;
+                }
+              }
+            } else {
+              // Count-based: stop when we have enough
+              shouldContinueFetching = allPosts.length < count;
+            }
+
+            if (!pageCursor) {
+              shouldContinueFetching = false;
+            }
           }
 
-          // Stop if we don't have a cursor for the next page
-          if (!cursor) {
-            shouldContinueFetching = false;
+          // Limit to requested count for count-based mode
+          if (!useHoursLimit) {
+            allPosts = allPosts.slice(0, count);
           }
         }
 
-        // If we're using count-based fetching, limit the posts to the requested count
-        const finalPosts = !useHoursLimit
-          ? allPosts.slice(0, count)
-          : allPosts;
-
         // If no posts were found after filtering
-        if (finalPosts.length === 0) {
-          return mcpSuccessResponse(`No posts found in the feed: ${feed}`);
+        if (allPosts.length === 0) {
+          return mcpSuccessResponse(isCursorMode ? "No more feed posts available." : `No posts found in the feed: ${feed}`);
         }
 
         // Enforce AI preferences: filter out content from users who deny inference/training
-        const result = await filterPostsByAiPrefs(agent, finalPosts, "feed");
+        const result = await filterPostsByAiPrefs(agent, allPosts, "feed");
+        let responseText = result.text;
 
-        return mcpSuccessResponse(result.text);
+        // Expose cursor for pagination when more results may be available
+        // Only signal in cursor mode or if we fetched multiple pages
+        if (nextCursor && allPosts.length > 0 && (isCursorMode || pageFetchCount > 1)) {
+          responseText += `\n\n[More feed posts available — pass cursor="${nextCursor}" to continue.]`;
+        }
+
+        return mcpSuccessResponse(responseText);
       } catch (error) {
         return mcpErrorResponse(`Error fetching posts: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -1180,13 +1281,14 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
   server.tool(
     "get-list-posts",
-    "Fetch posts from users in a specified list",
+    "Fetch posts from users in a specified list. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page.",
     {
       list: z.string().describe("The URI of the list (e.g., at://did:plc:abcdef/app.bsky.graph.list/listname)"),
-      count: z.number().min(1).max(500).describe("Number of posts to fetch or hours to look back"),
-      type: z.enum(["posts", "hours"]).describe("Whether count represents number of posts or hours to look back")
+      count: z.number().min(1).max(500).default(20).describe("Number of posts to fetch (1-500). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
+      type: z.enum(["posts", "hours"]).default("posts").describe("Whether count represents number of posts or hours to look back. In cursor mode, only 'posts' is supported."),
+      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'.")
     },
-    async ({ list, count, type }) => {
+    async ({ list, count, type, cursor }) => {
       const agent = getAgent();
       if (!agent) {
         return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
@@ -1199,85 +1301,108 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
           return mcpErrorResponse(`Invalid list URI or list not found: ${list}.`);
         }
 
-        const MAX_TOTAL_POSTS = 500; // Safety limit to prevent excessive API calls
+        // Cursor mode: fetch a single page starting from the cursor.
+        // Time-based mode does not support cursor (time window is relative to now).
+        const isCursorMode = !!cursor && type === "posts";
 
         let allPosts: any[] = [];
         let nextCursor: string | undefined = undefined;
-        let shouldContinueFetching = true;
+        let pageFetchCount = 0;
 
-        // Set up time-based or count-based fetching
-        const useHoursLimit = type === "hours";
-        const targetHours = count;
-        const targetDate = new Date(Date.now() - targetHours * 60 * 60 * 1000);
-
-        while (shouldContinueFetching && allPosts.length < MAX_TOTAL_POSTS) {
-          // Calculate how many posts to fetch in this batch
-          const batchLimit = 100;
-
+        if (isCursorMode) {
+          // Single-page fetch starting from the cursor
           const response = await agent.app.bsky.feed.getListFeed({
             list,
-            limit: batchLimit,
-            cursor: nextCursor
+            limit: count,
+            cursor: cursor
           });
 
-          if (!response.success) {
-            break;
+          if (response.success) {
+            allPosts = response.data.feed;
+            nextCursor = response.data.cursor;
           }
+        } else {
+          // Auto-paginate: fetch posts until we have enough or run out
+          const MAX_TOTAL_POSTS = 500;
+          let shouldContinueFetching = true;
+          let pageFetchCount = 0;
 
-          const { feed, cursor } = response.data;
+          // Set up time-based or count-based fetching
+          const useHoursLimit = type === "hours";
+          const targetHours = count;
+          const targetDate = new Date(Date.now() - targetHours * 60 * 60 * 1000);
 
-          // Filter posts based on time window if using hours limit
-          let filteredFeed = feed;
-          if (useHoursLimit) {
-            filteredFeed = feed.filter(post => {
-              const createdAt = post?.post?.record?.createdAt;
-              if (!createdAt || typeof createdAt !== 'string') return false;
-              const postDate = new Date(createdAt);
-              return postDate >= targetDate;
+          while (shouldContinueFetching && allPosts.length < MAX_TOTAL_POSTS) {
+            const batchLimit = Math.min(100, count - allPosts.length);
+
+            const response = await agent.app.bsky.feed.getListFeed({
+              list,
+              limit: batchLimit,
+              cursor: nextCursor
             });
-          }
 
-          // Add the filtered posts to our collection
-          allPosts = allPosts.concat(filteredFeed);
-
-          // Update cursor for the next batch
-          nextCursor = cursor;
-
-          // Check if we should continue fetching based on the mode
-          if (useHoursLimit) {
-            // Check if we've reached posts older than our target date
-            const oldestPost = feed[feed.length - 1];
-            if (oldestPost?.post?.record?.createdAt && typeof oldestPost.post.record.createdAt === 'string') {
-              const postDate = new Date(oldestPost.post.record.createdAt);
-              if (postDate < targetDate) {
-                shouldContinueFetching = false;
-              }
+            if (!response.success) {
+              break;
             }
-          } else {
-            // If we're using count-based fetching, stop when we have enough posts
-            shouldContinueFetching = allPosts.length < count;
+
+            const { feed, cursor: pageCursor } = response.data;
+            pageFetchCount++;
+
+            // Filter posts based on time window if using hours limit
+            let filteredFeed = feed;
+            if (useHoursLimit) {
+              filteredFeed = feed.filter(post => {
+                const createdAt = post?.post?.record?.createdAt;
+                if (!createdAt || typeof createdAt !== 'string') return false;
+                const postDate = new Date(createdAt);
+                return postDate >= targetDate;
+              });
+            }
+
+            allPosts = allPosts.concat(filteredFeed);
+            nextCursor = pageCursor;
+
+            // Time-based: stop when we've gone past the target date
+            if (useHoursLimit) {
+              const oldestPost = feed[feed.length - 1];
+              if (oldestPost?.post?.record?.createdAt && typeof oldestPost.post.record.createdAt === 'string') {
+                const postDate = new Date(oldestPost.post.record.createdAt);
+                if (postDate < targetDate) {
+                  shouldContinueFetching = false;
+                }
+              }
+            } else {
+              // Count-based: stop when we have enough
+              shouldContinueFetching = allPosts.length < count;
+            }
+
+            if (!pageCursor) {
+              shouldContinueFetching = false;
+            }
           }
 
-          // Stop if we don't have a cursor for the next page
-          if (!cursor) {
-            shouldContinueFetching = false;
+          // Limit to requested count for count-based mode
+          if (!useHoursLimit) {
+            allPosts = allPosts.slice(0, count);
           }
         }
 
-        // If we're using count-based fetching, limit the posts to the requested count
-        const finalPosts = !useHoursLimit
-          ? allPosts.slice(0, count)
-          : allPosts;
-
         // If no posts were found after filtering
-        if (finalPosts.length === 0) {
-          return mcpSuccessResponse(`No posts found from the list.`);
+        if (allPosts.length === 0) {
+          return mcpSuccessResponse(isCursorMode ? "No more list posts available." : `No posts found from the list.`);
         }
 
         // Enforce AI preferences: filter out content from users who deny inference/training
-        const result = await filterPostsByAiPrefs(agent, finalPosts, "list");
+        const result = await filterPostsByAiPrefs(agent, allPosts, "list");
+        let responseText = result.text;
 
-        return mcpSuccessResponse(result.text);
+        // Expose cursor for pagination when more results may be available
+        // Only signal in cursor mode or if we fetched multiple pages
+        if (nextCursor && allPosts.length > 0 && (isCursorMode || pageFetchCount > 1)) {
+          responseText += `\n\n[More list posts available — pass cursor="${nextCursor}" to continue.]`;
+        }
+
+        return mcpSuccessResponse(responseText);
       } catch (error) {
         return mcpErrorResponse(`Error fetching list posts: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -1286,20 +1411,21 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
   server.tool(
     "get-user-posts",
-    "Fetch posts from a specific user",
+    "Fetch posts from a specific user. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page.",
     {
       user: z.string().describe("The handle or DID of the user (e.g., alice.bsky.social)"),
-      count: z.number().min(1).max(500).describe("Number of posts to fetch or hours to look back"),
-      type: z.enum(["posts", "hours"]).describe("Whether count represents number of posts or hours to look back"),
+      count: z.number().min(1).max(500).default(20).describe("Number of posts to fetch (1-500). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
+      type: z.enum(["posts", "hours"]).default("posts").describe("Whether count represents number of posts or hours to look back. In cursor mode, only 'posts' is supported."),
       filter: z.enum([
         "posts_with_replies",
         "posts_no_replies",
         "posts_and_author_threads",
         "posts_with_media",
         "posts_with_video"
-      ]).default("posts_with_replies").describe("Filter posts by type. Default includes replies. Options: posts_with_replies (all posts including replies), posts_no_replies (exclude replies), posts_and_author_threads (posts and self-reply threads), posts_with_media (only posts with media), posts_with_video (only posts with video)")
+      ]).default("posts_with_replies").describe("Filter posts by type. Default includes replies. Options: posts_with_replies (all posts including replies), posts_no_replies (exclude replies), posts_and_author_threads (posts and self-reply threads), posts_with_media (only posts with media), posts_with_video (only posts with video)"),
+      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'.")
     },
-    async ({ user, count, type, filter }) => {
+    async ({ user, count, type, filter, cursor }) => {
       const agent = getAgent();
       if (!agent) {
         return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
@@ -1313,86 +1439,110 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
             return mcpErrorResponse(`User not found: ${user}`);
           }
 
-          const MAX_TOTAL_POSTS = 500; // Safety limit to prevent excessive API calls
+          // Cursor mode: fetch a single page starting from the cursor.
+          // Time-based mode does not support cursor (time window is relative to now).
+          const isCursorMode = !!cursor && type === "posts";
 
           let allPosts: any[] = [];
           let nextCursor: string | undefined = undefined;
-          let shouldContinueFetching = true;
+          let pageFetchCount = 0;
 
-          // Set up time-based or count-based fetching
-          const useHoursLimit = type === "hours";
-          const targetHours = count;
-          const targetDate = new Date(Date.now() - targetHours * 60 * 60 * 1000);
-
-          while (shouldContinueFetching && allPosts.length < MAX_TOTAL_POSTS) {
-            // Calculate how many posts to fetch in this batch
-            const batchLimit = 100;
-
+          if (isCursorMode) {
+            // Single-page fetch starting from the cursor
             const response = await agent.app.bsky.feed.getAuthorFeed({
               actor: profileResponse.data.did,
-              limit: batchLimit,
-              cursor: nextCursor,
+              limit: count,
+              cursor: cursor,
               filter: filter
             });
 
-            if (!response.success) {
-              break;
+            if (response.success) {
+              allPosts = response.data.feed;
+              nextCursor = response.data.cursor;
             }
+          } else {
+            // Auto-paginate: fetch posts until we have enough or run out
+            const MAX_TOTAL_POSTS = 500;
+            let shouldContinueFetching = true;
+            let pageFetchCount = 0;
 
-            const { feed, cursor } = response.data;
+            // Set up time-based or count-based fetching
+            const useHoursLimit = type === "hours";
+            const targetHours = count;
+            const targetDate = new Date(Date.now() - targetHours * 60 * 60 * 1000);
 
-            // Filter posts based on time window if using hours limit
-            let filteredFeed = feed;
-            if (useHoursLimit) {
-              filteredFeed = feed.filter(post => {
-                const createdAt = post?.post?.record?.createdAt;
-                if (!createdAt || typeof createdAt !== 'string') return false;
-                const postDate = new Date(createdAt);
-                return postDate >= targetDate;
+            while (shouldContinueFetching && allPosts.length < MAX_TOTAL_POSTS) {
+              const batchLimit = Math.min(100, count - allPosts.length);
+
+              const response = await agent.app.bsky.feed.getAuthorFeed({
+                actor: profileResponse.data.did,
+                limit: batchLimit,
+                cursor: nextCursor,
+                filter: filter
               });
-            }
 
-            // Add the filtered posts to our collection
-            allPosts = allPosts.concat(filteredFeed);
-
-            // Update cursor for the next batch
-            nextCursor = cursor;
-
-            // Check if we should continue fetching based on the mode
-            if (useHoursLimit) {
-              // Check if we've reached posts older than our target date
-              const oldestPost = feed[feed.length - 1];
-              if (oldestPost?.post?.record?.createdAt && typeof oldestPost.post.record.createdAt === 'string') {
-                const postDate = new Date(oldestPost.post.record.createdAt);
-                if (postDate < targetDate) {
-                  shouldContinueFetching = false;
-                }
+              if (!response.success) {
+                break;
               }
-            } else {
-              // If we're using count-based fetching, stop when we have enough posts
-              shouldContinueFetching = allPosts.length < count;
+
+              const { feed, cursor: pageCursor } = response.data;
+              pageFetchCount++;
+
+              // Filter posts based on time window if using hours limit
+              let filteredFeed = feed;
+              if (useHoursLimit) {
+                filteredFeed = feed.filter(post => {
+                  const createdAt = post?.post?.record?.createdAt;
+                  if (!createdAt || typeof createdAt !== 'string') return false;
+                  const postDate = new Date(createdAt);
+                  return postDate >= targetDate;
+                });
+              }
+
+              allPosts = allPosts.concat(filteredFeed);
+              nextCursor = pageCursor;
+
+              // Time-based: stop when we've gone past the target date
+              if (useHoursLimit) {
+                const oldestPost = feed[feed.length - 1];
+                if (oldestPost?.post?.record?.createdAt && typeof oldestPost.post.record.createdAt === 'string') {
+                  const postDate = new Date(oldestPost.post.record.createdAt);
+                  if (postDate < targetDate) {
+                    shouldContinueFetching = false;
+                  }
+                }
+              } else {
+                // Count-based: stop when we have enough
+                shouldContinueFetching = allPosts.length < count;
+              }
+
+              if (!pageCursor) {
+                shouldContinueFetching = false;
+              }
             }
 
-            // Stop if we don't have a cursor for the next page
-            if (!cursor) {
-              shouldContinueFetching = false;
+            // Limit to requested count for count-based mode
+            if (!useHoursLimit) {
+              allPosts = allPosts.slice(0, count);
             }
           }
 
-          // If we're using count-based fetching, limit the posts to the requested count
-          const finalPosts = !useHoursLimit
-            ? allPosts.slice(0, count)
-            : allPosts;
-
           // If no posts were found after filtering
-          if (finalPosts.length === 0) {
-            return mcpSuccessResponse(`No posts found from @${user}.`);
+          if (allPosts.length === 0) {
+            return mcpSuccessResponse(isCursorMode ? "No more posts from this user available." : `No posts found from @${user}.`);
           }
 
           // Enforce AI preferences: filter out content from users who deny inference/training
-          const result = await filterPostsByAiPrefs(agent, finalPosts, "user");
+          const result = await filterPostsByAiPrefs(agent, allPosts, "user");
+          let responseText = result.text;
 
-          return mcpSuccessResponse(result.text);
+          // Expose cursor for pagination when more results may be available
+          // Only signal in cursor mode or if we fetched multiple pages
+          if (nextCursor && allPosts.length > 0 && (isCursorMode || pageFetchCount > 1)) {
+            responseText += `\n\n[More posts from @${user} available — pass cursor="${nextCursor}" to continue.]`;
+          }
+
+          return mcpSuccessResponse(responseText);
         } catch (profileError) {
           return mcpErrorResponse(`Error retrieving user profile: ${profileError instanceof Error ? profileError.message : String(profileError)}`);
         }

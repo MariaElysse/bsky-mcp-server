@@ -20,9 +20,9 @@ Here's the current list of tools provided:
 - **get-profile**: Returns the profile details of a specified user (handle, bio, follower/following counts, etc.)
 
 ### Timeline & Feed Tools
-- **get-timeline-posts**: Returns posts from the authenticated user's home timeline. Supports count-based and time-based fetching (e.g., "posts" or "hours").
-- **get-feed-posts**: Returns posts from a specified feed (custom user feed, algorithmic feed, etc.)
-- **get-notifications**: Fetches notifications from Bluesky, optionally filtered by type (reply, mention, like, repost, follow, quote).
+- **get-timeline-posts**: Returns posts from the authenticated user's home timeline. Supports count-based and time-based fetching (e.g., "posts" or "hours"). **Pagination**: Omit `cursor` to auto-fetch up to `count` posts, or pass a `cursor` from a previous response to fetch the next page.
+- **get-feed-posts**: Returns posts from a specified feed (custom user feed, algorithmic feed, etc.). **Pagination**: Omit `cursor` to auto-fetch up to `count` posts, or pass a `cursor` from a previous response to fetch the next page.
+- **get-notifications**: Fetches notifications from Bluesky, optionally filtered by type (reply, mention, like, repost, follow, quote). **Pagination**: Omit `cursor` to auto-fetch up to `limit` notifications, or pass a `cursor` from a previous response to fetch the next page.
 - **get-mention-context**: Fetches recent mentions of the authenticated user with full conversation thread context and AI preference filtering.
 
 ### Search Tools
@@ -44,9 +44,9 @@ Here's the current list of tools provided:
 
 ### Content Discovery Tools
 - **get-pinned-feeds**: Returns the set of all "pinned" items from the authenticated user's preferences.
-- **get-list-posts**: Returns posts from a specified Bluesky list (curated collection).
-- **get-user-posts**: Returns posts from a specific user.
-- **get-liked-posts**: Returns recent posts liked by the authenticated user.
+- **get-list-posts**: Returns posts from a specified Bluesky list (curated collection). **Pagination**: Omit `cursor` to auto-fetch up to `count` posts, or pass a `cursor` from a previous response to fetch the next page.
+- **get-user-posts**: Returns posts from a specific user. **Pagination**: Omit `cursor` to auto-fetch up to `count` posts, or pass a `cursor` from a previous response to fetch the next page.
+- **get-liked-posts**: Returns recent posts liked by the authenticated user. **Pagination**: Omit `cursor` to auto-fetch up to `limit` posts, or pass a `cursor` from a previous response to fetch the next page.
 - **get-post-likes**: Gets information about users who have liked a specific post.
 - **get-trends**: Returns current trending topics on Bluesky with post counts.
 
@@ -65,6 +65,26 @@ Here's the current list of tools provided:
 - You can ask for posts from search, timelines, lists, feeds, or profiles by time range. For example: "Summarize posts from my timeline for the last three days" or "Find me the most interesting article people have been talking about this week".
 - Get weird: "What's the funniest/most unhinged/weirdest/goofiest post you've seen on my timeline in the last 24 hours?"
 - Learn about yourself: "Analyze my liked posts and tell me what I'm into. Give me 3 interesting facts about what you've found and how it relates to my personality on bluesky" or "Who follows me on Bluesky? Give me a comprehensive report."
+
+## Cursor-Based Pagination
+
+All post-fetching tools support cursor-based pagination. When a tool returns results, the response text will include a message like:
+
+```
+[More posts available — pass cursor="abc123..." to continue.]
+```
+
+To fetch the next page, call the same tool with the `cursor` parameter set to the returned value:
+
+```
+get-timeline-posts: { count: 20, type: "posts", cursor: "abc123..." }
+```
+
+**How it works:**
+- **First call (no cursor):** The tool auto-fetches up to `count` posts by paginating internally. If more results are available, the response includes a cursor.
+- **Subsequent calls (with cursor):** The tool fetches a single page starting from the cursor, returning up to `count` posts.
+- **Time-based mode (`type: "hours"`):** Does not support cursor — always starts fresh from the current time window.
+- **Default `count`:** Most tools default to `count: 20` to keep responses concise. Increase it when you need more results in one call.
 
 ## Installation
 
