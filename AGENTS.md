@@ -126,7 +126,7 @@ When modifying content-fetching tools, ensure they respect AI preferences via `b
 4. **Windows compatibility**: The build script includes a Windows-specific chmod workaround. Don't remove it.
 5. **ESM only**: This project uses `"type": "module"` in package.json. Use `.js` extensions in imports.
 6. **Git trailer.** Every commit must include the trailer:
-   `Assisted-by: <model_name> via Hermes Agent`
+   `Assisted-by: $model_name via $agent_harness`
 
 ## Adding a New Tool — Checklist
 
