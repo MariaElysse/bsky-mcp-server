@@ -38,6 +38,7 @@ async function main() {
     ["mention-monitor", `node build/test/mention-monitor.test.js`],
     ["create-reply", "node build/test/create-reply.test.js"],
     ["custom-endpoint", "node build/test/custom-endpoint/test-custom-endpoint.js"],
+    ["pagination", "node build/test/pagination.test.js"],
   ];
 
   const results = [];
