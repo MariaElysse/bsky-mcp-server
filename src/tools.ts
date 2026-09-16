@@ -135,7 +135,6 @@ export function registerTools(server: McpServer, getAgent: AgentProvider): void 
           // Auto-paginate: fetch posts until we have enough or run out
           const MAX_TOTAL_POSTS = 500;
           let shouldContinueFetching = true;
-          let pageFetchCount = 0;
 
           // Set up time-based or count-based fetching
           const useHoursLimit = type === "hours";
@@ -144,7 +143,7 @@ export function registerTools(server: McpServer, getAgent: AgentProvider): void 
 
           while (shouldContinueFetching && allPosts.length < MAX_TOTAL_POSTS) {
             // Cap batch at 100 (API page size) but also respect remaining count
-            const batchLimit = Math.min(100, count - allPosts.length);
+            const batchLimit = Math.max(1, Math.min(100, count - allPosts.length));
 
             const response = await agent.getTimeline({
               limit: batchLimit,
@@ -209,7 +208,7 @@ export function registerTools(server: McpServer, getAgent: AgentProvider): void 
         // Only signal in cursor mode (explicit page request) or if we fetched multiple pages
         // (meaning the API has more pages beyond what we fetched)
         if (nextCursor && allPosts.length > 0 && (isCursorMode || pageFetchCount > 1)) {
-          responseText += `\n\n[More timeline posts available — pass cursor="${nextCursor}" to continue.]`;
+          responseText += `\n[More timeline posts available — pass cursor="${nextCursor}" to continue.]`;
         }
 
         return mcpSuccessResponse(responseText);
@@ -265,7 +264,6 @@ export function registerTools(server: McpServer, getAgent: AgentProvider): void 
         } else {
           // Auto-paginate: fetch notifications until we have enough or run out
           const MAX_NOTIFICATIONS = 500;
-          let pageFetchCount = 0;
 
           while (allNotifications.length < MAX_NOTIFICATIONS) {
             const batchLimit = Math.min(100, limit - allNotifications.length);
@@ -753,7 +751,6 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
           const MAX_BATCH_SIZE = 100;
           const MAX_BATCHES = 5;
           let batchCount = 0;
-          let pageFetchCount = 0;
 
           while (batchCount < MAX_BATCHES && allLikes.length < limit) {
             const batchLimit = Math.min(MAX_BATCH_SIZE, limit - allLikes.length);
@@ -1195,7 +1192,6 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
           // Auto-paginate: fetch posts until we have enough or run out
           const MAX_TOTAL_POSTS = 500;
           let shouldContinueFetching = true;
-          let pageFetchCount = 0;
 
           // Set up time-based or count-based fetching
           const useHoursLimit = type === "hours";
@@ -1203,7 +1199,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
           const targetDate = new Date(Date.now() - targetHours * 60 * 60 * 1000);
 
           while (shouldContinueFetching && allPosts.length < MAX_TOTAL_POSTS) {
-            const batchLimit = Math.min(100, count - allPosts.length);
+            const batchLimit = Math.max(1, Math.min(100, count - allPosts.length));
 
             const response = await agent.app.bsky.feed.getFeed({
               feed,
@@ -1269,7 +1265,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
         // Expose cursor for pagination when more results may be available
         // Only signal in cursor mode or if we fetched multiple pages
         if (nextCursor && allPosts.length > 0 && (isCursorMode || pageFetchCount > 1)) {
-          responseText += `\n\n[More feed posts available — pass cursor="${nextCursor}" to continue.]`;
+          responseText += `\n[More feed posts available — pass cursor="${nextCursor}" to continue.]`;
         }
 
         return mcpSuccessResponse(responseText);
@@ -1325,7 +1321,6 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
           // Auto-paginate: fetch posts until we have enough or run out
           const MAX_TOTAL_POSTS = 500;
           let shouldContinueFetching = true;
-          let pageFetchCount = 0;
 
           // Set up time-based or count-based fetching
           const useHoursLimit = type === "hours";
@@ -1333,7 +1328,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
           const targetDate = new Date(Date.now() - targetHours * 60 * 60 * 1000);
 
           while (shouldContinueFetching && allPosts.length < MAX_TOTAL_POSTS) {
-            const batchLimit = Math.min(100, count - allPosts.length);
+            const batchLimit = Math.max(1, Math.min(100, count - allPosts.length));
 
             const response = await agent.app.bsky.feed.getListFeed({
               list,
@@ -1399,7 +1394,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
         // Expose cursor for pagination when more results may be available
         // Only signal in cursor mode or if we fetched multiple pages
         if (nextCursor && allPosts.length > 0 && (isCursorMode || pageFetchCount > 1)) {
-          responseText += `\n\n[More list posts available — pass cursor="${nextCursor}" to continue.]`;
+          responseText += `\n[More list posts available — pass cursor="${nextCursor}" to continue.]`;
         }
 
         return mcpSuccessResponse(responseText);
@@ -1464,7 +1459,6 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
             // Auto-paginate: fetch posts until we have enough or run out
             const MAX_TOTAL_POSTS = 500;
             let shouldContinueFetching = true;
-            let pageFetchCount = 0;
 
             // Set up time-based or count-based fetching
             const useHoursLimit = type === "hours";
@@ -1472,7 +1466,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
             const targetDate = new Date(Date.now() - targetHours * 60 * 60 * 1000);
 
             while (shouldContinueFetching && allPosts.length < MAX_TOTAL_POSTS) {
-              const batchLimit = Math.min(100, count - allPosts.length);
+              const batchLimit = Math.max(1, Math.min(100, count - allPosts.length));
 
               const response = await agent.app.bsky.feed.getAuthorFeed({
                 actor: profileResponse.data.did,
@@ -1539,7 +1533,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
           // Expose cursor for pagination when more results may be available
           // Only signal in cursor mode or if we fetched multiple pages
           if (nextCursor && allPosts.length > 0 && (isCursorMode || pageFetchCount > 1)) {
-            responseText += `\n\n[More posts from @${user} available — pass cursor="${nextCursor}" to continue.]`;
+            responseText += `\n[More posts from @${user} available — pass cursor="${nextCursor}" to continue.]`;
           }
 
           return mcpSuccessResponse(responseText);
