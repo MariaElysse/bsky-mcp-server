@@ -58,4 +58,7 @@ sessions/
 # Cursor stuff
 .cursorrules
 
+# Qwen Code session data
+.qwen/
+
 POST_FORMAT_SPEC.md
