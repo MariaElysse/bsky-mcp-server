@@ -138,6 +138,68 @@ check('extract: oversize JSON body → null (cap enforced)', huge === null);
   check('thumb: non-image content-type → null, no upload', blob === null && calls.length === 0);
 }
 
+
+// Defensive transport, body, and upload failure paths.
+async function withFetch(fake: typeof fetch, test: () => Promise<void>) {
+  const original = globalThis.fetch;
+  globalThis.fetch = fake;
+  try {
+    await test();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+async function testMetadataDefensivePaths() {
+  await withFetch(async () => { throw new Error("network down"); }, async () => {
+    assert.equal(await fetchLinkMetadata("https://example.test/network"), null);
+  });
+
+  await withFetch(async () => new Response("not json", { status: 200 }), async () => {
+    assert.equal(await fetchLinkMetadata("https://example.test/bad-json"), null);
+  });
+
+  await withFetch(async () => new Response("{}", {
+    status: 200,
+    headers: { "content-length": String(64 * 1024 + 1) },
+  }), async () => {
+    assert.equal(await fetchLinkMetadata("https://example.test/declared-large"), null);
+  });
+
+  await withFetch(async () => new Response(null, { status: 200 }), async () => {
+    assert.equal(await fetchLinkMetadata("https://example.test/no-body"), null);
+  });
+}
+
+async function testThumbnailFailurePaths() {
+  await withFetch(async () => new Response("no", { status: 503 }), async () => {
+    assert.equal(await uploadThumbnail({} as any, "https://img.test/status"), null);
+  });
+
+  await withFetch(async () => { throw new Error("image network down"); }, async () => {
+    assert.equal(await uploadThumbnail({} as any, "https://img.test/network"), null);
+  });
+
+  await withFetch(async () => new Response(new Uint8Array([1, 2, 3]), {
+    status: 200,
+    headers: { "content-type": "image/png" },
+  }), async () => {
+    const failedUploadAgent = {
+      uploadBlob: async () => ({ success: false }),
+    };
+    assert.equal(await uploadThumbnail(failedUploadAgent as any, "https://img.test/upload-fails"), null);
+
+    const throwingUploadAgent = {
+      uploadBlob: async () => { throw new Error("PDS upload down"); },
+    };
+    assert.equal(await uploadThumbnail(throwingUploadAgent as any, "https://img.test/upload-throws"), null);
+  });
+}
+
+
+await testMetadataDefensivePaths();
+await testThumbnailFailurePaths();
+
 server.close();
 
 if (failures > 0) {

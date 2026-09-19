@@ -594,10 +594,31 @@ async function testFormatPermissionSummary() {
 }
 
 // ---------------------------------------------------------------------------
+
+// Additional metadata missing-data and network-error paths.
+async function testMissingThreadMetadata() {
+  const agent: any = {
+    app: { bsky: { feed: { getPostThread: async () => ({ success: true, data: {} }) } } },
+  };
+  const result = await tc.fetchThreadContextWithMeta(agent, "at://did:plc:none/app.bsky.feed.post/missing");
+  assert.deepEqual(result, { thread: "", excludedCount: 0 });
+}
+
+async function testMetadataNetworkFailure() {
+  const agent: any = {
+    app: { bsky: { feed: { getPostThread: async () => { throw new Error("network"); } } } },
+  };
+  const result = await tc.fetchThreadContextWithMeta(agent, "at://did:plc:none/app.bsky.feed.post/network");
+  assert.deepEqual(result, { thread: "", excludedCount: 0 });
+}
+
+
 // Run all tests
 // ---------------------------------------------------------------------------
 
 const tests: Array<[string, () => Promise<void>]> = [
+  ["fetchThreadContextWithMeta missing thread", testMissingThreadMetadata],
+  ["fetchThreadContextWithMeta network failure", testMetadataNetworkFailure],
   ["fetchThreadContext success", testFetchThreadContextSuccess],
   ["extractAllParticipants multi-level", testExtractAllParticipantsMultiLevel],
   ["formatThreadForReply isolates branch", testFormatThreadForReply],

@@ -14,6 +14,7 @@
  */
 
 import assert from "node:assert/strict";
+import { batchCheckAiPreferences, checkAiPreference, fetchAiPreferences, isContentAllowed } from "../src/ai-preferences.js";
 
 // ---------------------------------------------------------------------------
 // Helpers — we import the compiled JS so tests run without a test framework.
@@ -583,11 +584,98 @@ async function testFilterThreadMalformed() {
 }
 
 // ---------------------------------------------------------------------------
+
+// Additional cache, single-DID, and repository-failure paths.
+function agentFor(recordByDid: Map<string, any>, options: { throwFor?: Set<string> } = {}) {
+  let calls = 0;
+  return {
+    get calls() {
+      return calls;
+    },
+    com: {
+      atproto: {
+        repo: {
+          getRecord: async ({ repo }: { repo: string }) => {
+            calls++;
+            if (options.throwFor?.has(repo)) {
+              throw new Error("repository unavailable");
+            }
+            const value = recordByDid.get(repo);
+            return value === undefined
+              ? { success: false }
+              : { success: true, data: { value } };
+          },
+        },
+      },
+    },
+  } as any;
+}
+
+async function testCacheHitAndDeny() {
+  const did = "did:plc:cache-hit-extra";
+  const agent = agentFor(new Map([[did, { preferences: { inference: { allow: true }, training: { allow: true } } }]]));
+
+  assert.equal(await checkAiPreference(agent, did), true);
+  assert.equal(agent.calls, 1, "the first check should fetch the record");
+  assert.equal(isContentAllowed(did), true, "an allowed cached record should be allowed");
+
+  // A cached denial is observable through both cache helpers. Use a unique DID
+  // so the module-level cache from other suites cannot affect this assertion.
+  const deniedDid = "did:plc:cache-deny-extra";
+  const deniedAgent = agentFor(new Map([[deniedDid, { preferences: { inference: { allow: false } } }]]));
+  assert.equal(await checkAiPreference(deniedAgent, deniedDid), false);
+  assert.equal(isContentAllowed(deniedDid), false);
+  assert.equal(deniedAgent.calls, 1);
+}
+
+async function testCheckPreferenceFetchFallbacksAndCustomCategories() {
+  const missingDid = "did:plc:missing-extra";
+  const missingAgent = agentFor(new Map());
+  assert.equal(await checkAiPreference(missingAgent, missingDid), true, "missing records are privacy-first allow");
+
+  const throwingDid = "did:plc:throwing-extra";
+  const throwingAgent = agentFor(new Map(), { throwFor: new Set([throwingDid]) });
+  assert.equal(await checkAiPreference(throwingAgent, throwingDid), true, "fetch errors are privacy-first allow");
+
+  const embeddingDid = "did:plc:embedding-extra";
+  const embeddingAgent = agentFor(new Map([[embeddingDid, {
+    preferences: { embedding: { allow: false }, inference: { allow: true } },
+  }]]));
+  assert.equal(await checkAiPreference(embeddingAgent, embeddingDid, ["embedding"]), false);
+  assert.equal(await checkAiPreference(embeddingAgent, embeddingDid, ["inference"]), true);
+
+  const directFailure = await fetchAiPreferences(agentFor(new Map()), "did:plc:direct-missing-extra");
+  assert.equal(directFailure, null);
+}
+
+async function testBatchUsesCachedEntriesAndDeduplicatesResults() {
+  const cachedDid = "did:plc:batch-cached-extra";
+  const freshDid = "did:plc:batch-fresh-extra";
+  const agent = agentFor(new Map([
+    [cachedDid, { preferences: { inference: { allow: true } } }],
+    [freshDid, { preferences: { training: { allow: false } } }],
+  ]));
+
+  // Prime the module cache, then make a batch request containing the cached DID
+  // twice. The batch path should use the cache and fetch only the fresh DID.
+  assert.equal(await checkAiPreference(agent, cachedDid), true);
+  const callsBefore = agent.calls;
+  const result = await batchCheckAiPreferences(agent, [cachedDid, cachedDid, freshDid]);
+  assert.equal(agent.calls, callsBefore + 1);
+  assert.equal(result.get(cachedDid), true);
+  assert.equal(result.get(freshDid), false);
+  assert.equal(result.size, 2, "the result map should contain one entry per DID");
+}
+
+
 // Runner
 // ---------------------------------------------------------------------------
 
 async function main() {
   const cases: Array<[string, () => Promise<void>]> = [
+    ["AI preference cache hit allow/deny", testCacheHitAndDeny],
+    ["AI preference single-check fallbacks and custom categories", testCheckPreferenceFetchFallbacksAndCustomCategories],
+    ["AI preference batch cache path", testBatchUsesCachedEntriesAndDeduplicatesResults],
     // (1) flatten/unflatten round-trips
     ["flattenAiPreferences — all allow", testFlattenAllAllow],
     ["flattenAiPreferences — all deny", testFlattenAllDeny],
