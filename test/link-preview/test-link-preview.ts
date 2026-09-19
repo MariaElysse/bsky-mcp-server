@@ -5,6 +5,7 @@
 import assert from 'assert';
 import http from 'node:http';
 import { AddressInfo } from 'node:net';
+import { runTests, type TestCase } from '../test-helpers.js';
 
 // Point the module at our local stand-in before importing it.
 const server = http.createServer((req, res) => routes(req, res));
@@ -92,55 +93,8 @@ function fakeAgent() {
   return { agent: agent as unknown as import('@atproto/api').Agent, calls };
 }
 
-let failures = 0;
-function check(name: string, cond: boolean, detail = ''): void {
-  if (cond) {
-    console.log(`✅ ${name}`);
-  } else {
-    failures++;
-    console.error(`❌ ${name} ${detail}`);
-  }
-}
-
-// ---- fetchLinkMetadata cases -----------------------------------------------
-
-const meta = await fetchLinkMetadata(`${base}/page/ok`);
-check('extract: maps cardyb fields', !!meta && meta.title === 'Example Title' && meta.description === 'Example description', JSON.stringify(meta));
-check('extract: image URL passed through', !!meta && meta.imageUrl === `${base}/v1/image?ok`);
-
-const errCard = await fetchLinkMetadata('https://cardyb-error.test');
-check('extract: cardyb error field → null', errCard === null);
-
-const http500 = await fetchLinkMetadata('https://server-error.test');
-check('extract: cardyb non-200 → null', http500 === null);
-
-const noTitle = await fetchLinkMetadata('https://no-title.test/article');
-check('extract: empty title falls back to url', noTitle?.title === 'https://no-title.test/article', JSON.stringify(noTitle));
-
-const huge = await fetchLinkMetadata('https://huge-json.test');
-check('extract: oversize JSON body → null (cap enforced)', huge === null);
-
-// ---- uploadThumbnail cases -------------------------------------------------
-
-{
-  const { agent, calls } = fakeAgent();
-  const blob = await uploadThumbnail(agent, `${base}/v1/image?ok`);
-  check('thumb: small image uploads', blob !== null && calls.length === 1 && calls[0].bytes === 2048, JSON.stringify(calls));
-}
-{
-  const { agent, calls } = fakeAgent();
-  const blob = await uploadThumbnail(agent, `${base}/v1/image?huge`);
-  check('thumb: oversize image → null, no upload', blob === null && calls.length === 0);
-}
-{
-  const { agent, calls } = fakeAgent();
-  const blob = await uploadThumbnail(agent, `${base}/v1/image?not-image`);
-  check('thumb: non-image content-type → null, no upload', blob === null && calls.length === 0);
-}
-
-
 // Defensive transport, body, and upload failure paths.
-async function withFetch(fake: typeof fetch, test: () => Promise<void>) {
+async function withFetch(fake: typeof fetch, test: () => Promise<void>): Promise<void> {
   const original = globalThis.fetch;
   globalThis.fetch = fake;
   try {
@@ -150,7 +104,7 @@ async function withFetch(fake: typeof fetch, test: () => Promise<void>) {
   }
 }
 
-async function testMetadataDefensivePaths() {
+async function testMetadataDefensivePaths(): Promise<void> {
   await withFetch(async () => { throw new Error("network down"); }, async () => {
     assert.equal(await fetchLinkMetadata("https://example.test/network"), null);
   });
@@ -171,7 +125,7 @@ async function testMetadataDefensivePaths() {
   });
 }
 
-async function testThumbnailFailurePaths() {
+async function testThumbnailFailurePaths(): Promise<void> {
   await withFetch(async () => new Response("no", { status: 503 }), async () => {
     assert.equal(await uploadThumbnail({} as any, "https://img.test/status"), null);
   });
@@ -196,14 +150,51 @@ async function testThumbnailFailurePaths() {
   });
 }
 
+const tests: TestCase[] = [
+  ['extract: maps cardyb fields', async () => {
+    const meta = await fetchLinkMetadata(`${base}/page/ok`);
+    assert(meta && meta.title === 'Example Title' && meta.description === 'Example description');
+  }],
+  ['extract: passes image URL through', async () => {
+    const meta = await fetchLinkMetadata(`${base}/page/ok`);
+    assert(meta && meta.imageUrl === `${base}/v1/image?ok`);
+  }],
+  ['extract: cardyb error field returns null', async () => {
+    assert.equal(await fetchLinkMetadata('https://cardyb-error.test'), null);
+  }],
+  ['extract: cardyb non-200 response returns null', async () => {
+    assert.equal(await fetchLinkMetadata('https://server-error.test'), null);
+  }],
+  ['extract: empty title falls back to URL', async () => {
+    const meta = await fetchLinkMetadata('https://no-title.test/article');
+    assert.equal(meta?.title, 'https://no-title.test/article');
+  }],
+  ['extract: oversize JSON body returns null', async () => {
+    assert.equal(await fetchLinkMetadata('https://huge-json.test'), null);
+  }],
+  ['thumbnail: small image uploads', async () => {
+    const { agent, calls } = fakeAgent();
+    const blob = await uploadThumbnail(agent, `${base}/v1/image?ok`);
+    assert(blob !== null && calls.length === 1 && calls[0].bytes === 2048);
+  }],
+  ['thumbnail: oversize image returns null without uploading', async () => {
+    const { agent, calls } = fakeAgent();
+    const blob = await uploadThumbnail(agent, `${base}/v1/image?huge`);
+    assert.equal(blob, null);
+    assert.equal(calls.length, 0);
+  }],
+  ['thumbnail: non-image content type returns null without uploading', async () => {
+    const { agent, calls } = fakeAgent();
+    const blob = await uploadThumbnail(agent, `${base}/v1/image?not-image`);
+    assert.equal(blob, null);
+    assert.equal(calls.length, 0);
+  }],
+  ['defensive metadata transport and body failures return null', testMetadataDefensivePaths],
+  ['defensive thumbnail transport and upload failures return null', testThumbnailFailurePaths],
+];
 
-await testMetadataDefensivePaths();
-await testThumbnailFailurePaths();
-
-server.close();
-
-if (failures > 0) {
-  console.error(`\n${failures} test(s) failed`);
-  process.exit(1);
+try {
+  await runTests(tests);
+} finally {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
 }
-console.log('\nAll link-preview tests passed');

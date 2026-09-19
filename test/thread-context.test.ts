@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runTests } from "./test-helpers.js";
 /**
  * thread-context.test — unit tests for src/thread-context.ts
  *
@@ -639,20 +640,5 @@ const tests: Array<[string, () => Promise<void>]> = [
   ["formatPermissionSummary correct output", testFormatPermissionSummary],
 ];
 
-let passed = 0;
-let failed = 0;
 
-for (const [name, fn] of tests) {
-  try {
-    await fn();
-    console.log("PASS: " + name);
-    passed++;
-  } catch (err: any) {
-    console.error("FAIL: " + name);
-    console.error("  Error: " + (err instanceof Error ? err.message : String(err)));
-    failed++;
-  }
-}
-
-console.log("\nResults: " + passed + "/" + tests.length + " passed, " + failed + " failed");
-if (failed > 0) process.exit(1);
+await runTests(tests);

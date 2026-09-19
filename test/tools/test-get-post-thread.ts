@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { AtpAgent } from "@atproto/api";
 import dotenv from 'dotenv';
+import { runTests } from '../test-helpers.js';
 
 // Get current file path and directory path in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -23,7 +24,6 @@ async function initializeBlueskyConnection() {
   const service = process.env.BLUESKY_SERVICE_URL || "https://bsky.social";
 
   if (!identifier || !password) {
-    console.error("Error: BLUESKY_IDENTIFIER and BLUESKY_APP_PASSWORD environment variables must be set");
     return null;
   }
 
@@ -32,14 +32,11 @@ async function initializeBlueskyConnection() {
     const result = await agent.login({ identifier, password });
 
     if (result.success) {
-      console.log(`Successfully logged in as ${result.data.handle} (${result.data.did})`);
       return agent;
     } else {
-      console.error("Login failed: Invalid credentials.");
       return null;
     }
   } catch (error) {
-    console.error(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }
@@ -222,50 +219,31 @@ function formatPostThread(threadView: any): string {
   return output;
 }
 
-async function runTest() {
-  // Initialize connection
+async function runTest(): Promise<void> {
   const agent = await initializeBlueskyConnection();
   if (!agent) {
-    console.error("Failed to initialize Bluesky connection");
-    process.exit(1);
+    throw new Error("Bluesky connection could not be initialized");
   }
-  
-  try {
-    console.log(`\nFetching thread for: ${TEST_POST_URI}`);
-    
-    // Fetch the thread
-    const response = await agent.app.bsky.feed.getPostThread({
-      uri: TEST_POST_URI,
-      depth: 3
-    });
-    
-    if (!response.success) {
-      console.error("Failed to fetch thread:", response);
-      process.exit(1);
-    }
-    
-    console.log("Thread fetched successfully!");
-    
-    // Format the thread
-    const formattedThread = formatPostThread(response.data.thread);
-    
-    // Save formatted output to file
-    const outputDir = path.join(__dirname, '../../test/output');
-    if (!fs.existsSync(outputDir)) {
-      fs.mkdirSync(outputDir, { recursive: true });
-    }
-    
-    const outputPath = path.join(outputDir, 'formatted_thread.xml');
-    fs.writeFileSync(outputPath, formattedThread);
-    
-    console.log(`\nFormatted thread saved to: ${outputPath}`);
-    console.log("\nTest completed successfully!");
-    
-  } catch (error) {
-    console.error("Error during test:", error);
-    process.exit(1);
+
+  const response = await agent.app.bsky.feed.getPostThread({
+    uri: TEST_POST_URI,
+    depth: 3,
+  });
+
+  if (!response.success) {
+    throw new Error("Bluesky thread request failed");
   }
+
+  const formattedThread = formatPostThread(response.data.thread);
+  const outputDir = path.join(__dirname, '../../test/output');
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+
+  const outputPath = path.join(outputDir, 'formatted_thread.xml');
+  fs.writeFileSync(outputPath, formattedThread);
 }
 
-// Run the test
-runTest();
+await runTests([
+  ['fetch and format a Bluesky post thread', runTest],
+]);

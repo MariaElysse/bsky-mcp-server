@@ -1,3 +1,4 @@
+import { runTests } from "./test-helpers.js";
 import assert from "node:assert/strict";
 import http from "node:http";
 import fs from "node:fs";
@@ -352,23 +353,7 @@ async function main() {
     ["callback preserves state bytes for mis-encoding clients", testCallbackPreservesStateBytesForMisEncodingClients],
   ];
 
-  let failed = 0;
-  for (const [name, fn] of cases) {
-    try {
-      await fn();
-      console.log(`ok - ${name}`);
-    } catch (err) {
-      failed += 1;
-      console.error(`FAIL - ${name}`);
-      console.error(err);
-    }
-  }
-
-  if (failed > 0) {
-    console.error(`\n${failed} / ${cases.length} test(s) failed`);
-    process.exit(1);
-  }
-  console.log(`\n${cases.length} / ${cases.length} test(s) passed`);
+  await runTests(cases);
 }
 
 main().catch(err => {

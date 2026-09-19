@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runTests } from "./test-helpers.js";
 /**
  * mention-monitor.test.ts — Comprehensive integration test suite for
  * `run-mention-monitor` MCP tool.
@@ -820,25 +821,7 @@ async function main() {
     ["testListNotificationsFailure", testListNotificationsFailure],
   ];
 
-  let passed = 0;
-  let failed = 0;
-
-  for (const [name, fn] of tests) {
-    try {
-      await fn();
-      console.log(`ok - ${name}`);
-      passed++;
-    } catch (err) {
-      console.error(`not ok - ${name}`);
-      console.error(err);
-      failed++;
-    }
-  }
-
-  console.log(`\n${passed} / ${tests.length} test(s) passed`);
-  if (failed > 0) {
-    process.exit(1);
-  }
+  await runTests(tests);
 }
 
 main();

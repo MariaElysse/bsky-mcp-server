@@ -48,21 +48,19 @@ async function main() {
     console.log(`\n=== Running suite: ${name} ===`);
     const result = runSuite(name, cmd);
     results.push(result);
+    console.log(`${result.passed ? "ok" : "not ok"} - suite: ${name}`);
     if (!result.passed) allPassed = false;
   }
 
-  // Summary
+  // Emit the same result labels and totals used by each individual suite.
   const totalSuites = results.length;
   const passedSuites = results.filter((r) => r.passed).length;
   const failedSuites = totalSuites - passedSuites;
 
-  console.log("\n" + "=".repeat(50));
-  console.log(`Test Summary: ${totalSuites} suites — ${passedSuites} passed, ${failedSuites} failed`);
-  for (const r of results) {
-    const icon = r.passed ? "✓" : "✗";
-    console.log(`  ${icon} ${r.name}`);
+  console.log(`\n${passedSuites} / ${totalSuites} suite(s) passed`);
+  if (failedSuites > 0) {
+    console.error(`${failedSuites} / ${totalSuites} suite(s) failed`);
   }
-  console.log("=".repeat(50));
 
   process.exit(allPassed ? 0 : 1);
 }

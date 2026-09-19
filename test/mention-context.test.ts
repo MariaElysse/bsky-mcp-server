@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runTests } from "./test-helpers.js";
 /**
  * mention-context.test — unit and integration tests for get-mention-context MCP tool.
  *
@@ -816,27 +817,10 @@ const tests: Array<[string, () => Promise<void>]> = [
 
 async function main() {
   await setup();
-  let passed = 0;
-  let failed = 0;
-
-  for (const [name, fn] of tests) {
-    try {
-      await fn();
-      console.log(`ok - ${name}`);
-      passed++;
-    } catch (err) {
-      console.error(`FAIL - ${name}`);
-      console.error(err);
-      failed++;
-    }
-  }
+  await runTests(tests);
 
   await cleanup();
 
-  console.log(`\n${passed} / ${tests.length} test(s) passed`);
-  if (failed > 0) {
-    process.exit(1);
-  }
 }
 
 main();
