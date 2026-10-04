@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { Agent, RichText } from "@atproto/api";
+import { AtpAgent, Agent, RichText } from "@atproto/api";
 import {
   cleanHandle,
   formatSummaryText,
@@ -505,7 +505,8 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
       sort: z.enum(["top", "latest"]).default("top").describe("Sort order for search results - 'top' for most relevant or 'latest' for most recent"),
     },
     async ({ query, limit, sort }) => {
-      const agent = getAgent();
+    // TODO: Remove when https://github.com/blacksky-algorithms/rsky/issues/291 fixed
+    const agent = new AtpAgent({ service: "https://api.bsky.app" });
       if (!agent) {
         return mcpErrorResponse("Not logged in. Please check your environment variables.");
       }
@@ -621,7 +622,8 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
       limit: z.number().min(1).max(100).default(20).describe("Number of results to fetch (1-100)"),
     },
     async ({ query, limit }) => {
-      const agent = getAgent();
+    // TODO: Remove when https://github.com/blacksky-algorithms/rsky/issues/291 fixed
+    var agent = new AtpAgent({ service: "https://api.bsky.app" });
       if (!agent) {
         return mcpErrorResponse("Not logged in. Please check your environment variables.");
       }
