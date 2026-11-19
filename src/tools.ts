@@ -69,12 +69,34 @@ async function filterPostsByAiPrefs(
 }
 
 /**
+ * TODO: Remove when https://github.com/blacksky-algorithms/rsky/issues/291 fixed.
+ * The configured service host (blacksky.app) returns 502 for authenticated
+ * searchPosts/searchActors requests, so search tools route through an
+ * unauthenticated public agent on api.bsky.app by default. Kept behind a
+ * provider so tests can inject fakes (and so it can be reverted to
+ * `getAgent` in one place once the upstream issue is fixed).
+ */
+let publicSearchAgent: AtpAgent | null = null;
+function defaultSearchAgentProvider(): Agent | null {
+  if (!publicSearchAgent) {
+    publicSearchAgent = new AtpAgent({ service: "https://api.bsky.app" });
+  }
+  return publicSearchAgent;
+}
+
+/**
  * Register all Bluesky MCP tools on the provided server.
  * `getAgent` returns the currently authenticated AtpAgent for this session,
  * or null if the caller is not authenticated. It is evaluated per tool call
  * so OAuth-backed sessions can rotate credentials between invocations.
+ * `getSearchAgent` supplies the agent for search-posts and search-people;
+ * see defaultSearchAgentProvider for why searches bypass `getAgent`.
  */
-export function registerTools(server: McpServer, getAgent: AgentProvider): void {
+export function registerTools(
+  server: McpServer,
+  getAgent: AgentProvider,
+  getSearchAgent: AgentProvider = defaultSearchAgentProvider
+): void {
   server.tool(
     'get-my-handle-and-did',
     'Return the handle and did of the currently authenticated user for this blusesky session. Useful for when someone asks information about themselves using "me" or "my" on bluesky.',
@@ -505,8 +527,7 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
       sort: z.enum(["top", "latest"]).default("top").describe("Sort order for search results - 'top' for most relevant or 'latest' for most recent"),
     },
     async ({ query, limit, sort }) => {
-    // TODO: Remove when https://github.com/blacksky-algorithms/rsky/issues/291 fixed
-    const agent = new AtpAgent({ service: "https://api.bsky.app" });
+      const agent = getSearchAgent();
       if (!agent) {
         return mcpErrorResponse("Not logged in. Please check your environment variables.");
       }
@@ -622,8 +643,7 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
       limit: z.number().min(1).max(100).default(20).describe("Number of results to fetch (1-100)"),
     },
     async ({ query, limit }) => {
-    // TODO: Remove when https://github.com/blacksky-algorithms/rsky/issues/291 fixed
-    var agent = new AtpAgent({ service: "https://api.bsky.app" });
+      const agent = getSearchAgent();
       if (!agent) {
         return mcpErrorResponse("Not logged in. Please check your environment variables.");
       }
