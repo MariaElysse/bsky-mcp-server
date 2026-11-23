@@ -20,6 +20,7 @@ import { runTests } from "./test-helpers.js";
  *  (13) Graceful error handling on thread retrieval failure
  *  (14) maxMentions capping (only process requested batch limit)
  *  (15) Graceful error handling on listNotifications failure
+ *  (16) Auto-reply refused unless ALLOW_AUTO_REPLY=true (mentions stay pending)
  */
 
 import assert from "node:assert/strict";
@@ -31,8 +32,14 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Agent } from "@atproto/api";
 import { registerTools, AgentProvider } from "../src/tools.js";
+import { clearPreferenceCache } from "../src/ai-preferences.js";
 import { MentionStore } from "../src/mention-store.js";
-import { generateMentionReply, buildMentionReplyPrompt } from "../src/prompts.js";
+import { generateMentionReply } from "../src/prompts.js";
+
+// run-mention-monitor refuses to post on the user's behalf unless the server
+// process opted in at startup. The auto-reply cases below exercise the opted-in
+// path; testAutoReplyRequiresOptInEnv clears the variable for the refusal case.
+process.env.ALLOW_AUTO_REPLY = "true";
 
 // ---------------------------------------------------------------------------
 // Helpers and Harness
@@ -44,6 +51,12 @@ function makeTempStorePath(): string {
 }
 
 async function createHarness(provider: AgentProvider) {
+  // AI-preference verdicts (including "this author has no record") are cached
+  // process-wide for 5 minutes, so each harness starts from an empty cache:
+  // otherwise a DID mocked as allowing in one case would be reused as allowing
+  // in the next, whatever this case's fake agent says.
+  clearPreferenceCache();
+
   const server = new McpServer({ name: "test-server", version: "1.0.0" });
   registerTools(server, provider);
 
@@ -816,6 +829,68 @@ async function testListNotificationsFailure() {
 // ---------------------------------------------------------------------------
 
 async function main() {
+/** (16) Auto-reply refused unless ALLOW_AUTO_REPLY=true (mentions stay pending) */
+async function testAutoReplyRequiresOptInEnv() {
+  const storePath = makeTempStorePath();
+  process.env.MENTION_STORE_PATH = storePath;
+  delete process.env.ALLOW_AUTO_REPLY;
+
+  const mentionUri = "at://did:plc:alice/app.bsky.feed.post/gate1";
+  const notif = makeMockNotification(
+    "did:plc:alice",
+    "alice.bsky.social",
+    mentionUri,
+    "cid_gate_1",
+    "Ping @bot!"
+  );
+
+  let postCalls = 0;
+  const fakeAgent: any = {
+    did: "did:plc:bot",
+    app: {
+      bsky: {
+        notification: {
+          listNotifications: async () => ({
+            success: true,
+            data: { notifications: [notif] },
+          }),
+        },
+      },
+    },
+    post: async (record: any) => {
+      postCalls++;
+      return { uri: "at://did:plc:bot/app.bsky.feed.post/gate-reply", cid: "cid_gate_reply" };
+    },
+  };
+
+  try {
+    const { client, close } = await createHarness(() => fakeAgent);
+    try {
+      const res: any = await client.callTool({
+        name: "run-mention-monitor",
+        arguments: { poll: true, autoReply: true },
+      });
+
+      assert.equal(res.isError, undefined);
+      const text = res.content[0].text;
+      assert.match(text, /Auto-reply refused/);
+      assert.match(text, /ALLOW_AUTO_REPLY=true/);
+      assert.match(text, /0 mention\(s\) replied to automatically/);
+    } finally {
+      await close();
+    }
+
+    assert.equal(postCalls, 0, "no reply may be posted without the startup opt-in");
+
+    const store = new MentionStore(storePath);
+    const pending = await store.getPending();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].uri, mentionUri);
+  } finally {
+    process.env.ALLOW_AUTO_REPLY = "true";
+  }
+}
+
   const tests: Array<[string, () => Promise<void>]> = [
     ["testToolRegistration", testToolRegistration],
     ["testPollFalseReturnsStoreState", testPollFalseReturnsStoreState],
@@ -832,6 +907,7 @@ async function main() {
     ["testGracefulErrorHandlingOnGetPostThreadFailure", testGracefulErrorHandlingOnGetPostThreadFailure],
     ["testMaxMentionsLimit", testMaxMentionsLimit],
     ["testListNotificationsFailure", testListNotificationsFailure],
+    ["testAutoReplyRequiresOptInEnv", testAutoReplyRequiresOptInEnv],
   ];
 
   await runTests(tests);

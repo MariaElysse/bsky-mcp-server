@@ -13,14 +13,25 @@ import {
   parsePostUri,
 } from './utils.js';
 import { preprocessPosts, formatPostThread, formatPostThreadWithAiPrefs, filterThreadByAiPreferences } from "./llm-preprocessor.js";
-import { resourcesList } from './resources.js';
 import { fetchLinkMetadata, uploadThumbnail } from './link-preview.js';
-import { batchCheckAiPreferences, fetchAiPreferences, filterPostsByAiPreferences, getDidsFromThread, READ_PREFERENCES } from './ai-preferences.js';
+import { batchCheckAiPreferences, batchCheckAiPreferenceRecords, filterPostsByAiPreferences, getDidsFromThread, READ_PREFERENCES, type AiPreferencesRecord } from './ai-preferences.js';
 import { MentionStore, getMentionStore } from './mention-store.js';
+import { createHardenedFetch } from './atproto-fetch.js';
 import { fetchThreadContext } from './thread-context.js';
-import { generateMentionReply, buildMentionReplyPrompt } from './prompts.js';
+import { generateMentionReply } from './prompts.js';
 
 export type AgentProvider = () => Agent | null;
+
+/**
+ * MCP tool annotations — client-facing hints about what a call does.
+ * The SDK defaults are unfriendly (readOnlyHint defaults to false and
+ * destructiveHint to true), so every registration declares its own.
+ */
+const ANNOTATE_READ = { readOnlyHint: true, openWorldHint: true } as const;
+const ANNOTATE_LOCAL_READ = { readOnlyHint: true, openWorldHint: false } as const;
+const ANNOTATE_WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
+const ANNOTATE_WRITE_IDEMPOTENT = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
+const ANNOTATE_DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true } as const;
 
 /**
  * Filter posts by the current user's AI preferences.
@@ -40,15 +51,16 @@ async function filterPostsByAiPrefs(
     if (authorDid) didSet.add(authorDid);
   }
 
-  // Batch-check preferences — cast to any since Agent/AtpAgent types differ between index.ts and tools.ts
-  const allowedMap = await batchCheckAiPreferences(agent as any, Array.from(didSet));
-
-  // Build deniedRecords map for populated deniedCategories on tombstones
-  const deniedRecords = new Map<string, any>();
-  for (const [did, allowed] of allowedMap) {
-    if (!allowed) {
-      const record = await fetchAiPreferences(agent as any, did);
-      if (record) deniedRecords.set(did, record);
+  // One pass over the authors: each check carries the verdict, the author's
+  // record and the denied categories, so a denied post never costs a second
+  // round-trip just to label its tombstone.
+  const checks = await batchCheckAiPreferenceRecords(agent as any, Array.from(didSet));
+  const allowedMap = new Map<string, boolean>();
+  const deniedRecords = new Map<string, AiPreferencesRecord>();
+  for (const [did, check] of checks) {
+    allowedMap.set(did, check.allowed);
+    if (!check.allowed && check.record) {
+      deniedRecords.set(did, check.record);
     }
   }
 
@@ -57,6 +69,15 @@ async function filterPostsByAiPrefs(
 
   if (filtered.length === 0) {
     return { text: `No ${entityType} available.`, count: 0 };
+  }
+
+  if (skippedCount === filtered.length) {
+    // Everything the caller asked for was withheld; say so plainly rather than
+    // reporting an empty result set that reads like the feed was empty.
+    return {
+      text: `No visible ${entityType}. ${skippedCount} ${skippedCount === 1 ? 'post was' : 'posts were'} hidden by their authors' AI preferences.`,
+      count: 0,
+    };
   }
 
   // Format results — tombstones are rendered as <excluded_post> elements by preprocessPosts
@@ -80,7 +101,7 @@ async function filterPostsByAiPrefs(
 let publicSearchAgent: AtpAgent | null = null;
 function defaultSearchAgentProvider(): Agent | null {
   if (!publicSearchAgent) {
-    publicSearchAgent = new AtpAgent({ service: "https://api.bsky.app" });
+    publicSearchAgent = new AtpAgent({ service: "https://api.bsky.app", fetch: createHardenedFetch() });
   }
   return publicSearchAgent;
 }
@@ -101,8 +122,9 @@ export function registerTools(
 ): void {
   server.tool(
     'get-my-handle-and-did',
-    'Return the handle and did of the currently authenticated user for this blusesky session. Useful for when someone asks information about themselves using "me" or "my" on bluesky.',
+    "Return the handle and DID of the currently authenticated user for this Bluesky session. Useful for when someone asks information about themselves using \"me\" or \"my\" on Bluesky.",
     {},
+    ANNOTATE_LOCAL_READ,
     async () => {
       const agent = getAgent();
       if (!agent) {
@@ -129,6 +151,7 @@ export function registerTools(
       type: z.enum(["posts", "hours"]).default("posts").describe("Whether count represents number of posts or hours to look back. In cursor mode, only 'posts' is supported."),
       cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'.")
     },
+    ANNOTATE_READ,
     async ({ count, type, cursor }) => {
       try {
         const agent = getAgent();
@@ -257,6 +280,7 @@ export function registerTools(
       ])).optional().describe("Filter by notification types (e.g., ['reply', 'mention']). If not provided, returns all types."),
       cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call.")
     },
+    ANNOTATE_READ,
     async ({ limit, reasons, cursor }) => {
       const agent = getAgent();
       if (!agent) {
@@ -380,6 +404,7 @@ export function registerTools(
       previewUrl: z.string().url().optional().describe("Optional URL to generate preview card for. If not provided, uses first URL detected in text."),
       embedPreview: z.boolean().optional().default(true).describe("Whether to fetch and attach a link preview card. Defaults to true."),
     },
+    ANNOTATE_WRITE,
     async ({ text, replyTo, previewUrl, embedPreview = true }) => {
       const agent = getAgent();
       if (!agent) {
@@ -486,6 +511,7 @@ export function registerTools(
     {
       handle: z.string().describe("The handle of the user (e.g., alice.bsky.social)"),
     },
+    ANNOTATE_READ,
     async ({ handle }) => {
       const agent = getAgent();
       if (!agent) {
@@ -524,6 +550,7 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
       limit: z.number().min(1).max(100).default(50).describe("Number of results to fetch (1-100)"),
       sort: z.enum(["top", "latest"]).default("top").describe("Sort order for search results - 'top' for most relevant or 'latest' for most recent"),
     },
+    ANNOTATE_READ,
     async ({ query, limit, sort }) => {
       const agent = getSearchAgent();
       if (!agent) {
@@ -566,6 +593,7 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
     {
       uri: z.string().describe("URI of the post to fetch the thread for (e.g., at://did:plc:abcdef/app.bsky.feed.post/123)"),
     },
+    ANNOTATE_READ,
     async ({ uri }) => {
       const agent = getAgent();
       if (!agent) {
@@ -615,6 +643,7 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
     {
       url: z.string().describe("Bluesky post URL to convert (e.g., https://bsky.app/profile/username.bsky.social/post/postid)")
     },
+    ANNOTATE_LOCAL_READ,
     async ({ url }) => {
       const agent = getAgent();
       if (!agent) {
@@ -642,6 +671,7 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
       query: z.string().describe("Search query for finding users"),
       limit: z.number().min(1).max(100).default(20).describe("Number of results to fetch (1-100)"),
     },
+    ANNOTATE_READ,
     async ({ query, limit }) => {
       const agent = getSearchAgent();
       if (!agent) {
@@ -688,6 +718,7 @@ ${actor.indexedAt ? `Indexed At: ${new Date(actor.indexedAt).toLocaleString()}` 
       query: z.string().describe("Search query for finding feeds"),
       limit: z.number().min(1).max(100).default(10).describe("Number of results to fetch (1-100)"),
     },
+    ANNOTATE_READ,
     async ({ query, limit }) => {
       const agent = getAgent();
       if (!agent) {
@@ -735,6 +766,7 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
       limit: z.number().min(1).max(100).default(20).describe("Maximum number of liked posts to fetch (1-100). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
       cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call.")
     },
+    ANNOTATE_READ,
     async ({ limit, cursor }) => {
       const agent = getAgent();
       if (!agent) {
@@ -829,6 +861,7 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
       limit: z.number().min(1).max(50).default(10).describe("Number of trending topics to fetch (1-50)"),
       includeSuggested: z.boolean().default(false).describe("Whether to include suggested topics in addition to trending topics"),
     },
+    ANNOTATE_READ,
     async ({ limit, includeSuggested }) => {
       const agent = getAgent();
       if (!agent) {
@@ -905,6 +938,7 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
     {
       uri: z.string().describe("The URI of the post to like"),
     },
+    ANNOTATE_WRITE,
     async ({ uri }) => {
       const agent = getAgent();
       if (!agent) {
@@ -944,6 +978,7 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
     {
       handle: z.string().describe("The handle of the user to follow"),
     },
+    ANNOTATE_WRITE,
     async ({ handle }) => {
       const agent = getAgent();
       if (!agent) {
@@ -975,6 +1010,7 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
       followUri: z.string().optional().describe("The at:// URI of YOUR follow record to delete (e.g., at://did:plc:you/app.bsky.graph.follow/3kabc...). Returned by get-follows for the self path. Mutually exclusive with `user`."),
       user: z.string().optional().describe("The handle or DID of the followee. Used when you don't already have the follow record URI; the tool will list your follow records to find the matching rkey. Mutually exclusive with `followUri`."),
     },
+    ANNOTATE_DESTRUCTIVE,
     async ({ followUri, user }) => {
       const agent = getAgent();
       if (!agent) {
@@ -1061,6 +1097,7 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
     "get-pinned-feeds",
     "Get the authenticated user's pinned feeds and lists.",
     {},
+    ANNOTATE_READ,
     async () => {
       const agent = getAgent();
       if (!agent) {
@@ -1194,6 +1231,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
       type: z.enum(["posts", "hours"]).default("posts").describe("Whether count represents number of posts or hours to look back. In cursor mode, only 'posts' is supported."),
       cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'.")
     },
+    ANNOTATE_READ,
     async ({ feed, count, type, cursor }) => {
       const agent = getAgent();
       if (!agent) {
@@ -1322,6 +1360,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
       type: z.enum(["posts", "hours"]).default("posts").describe("Whether count represents number of posts or hours to look back. In cursor mode, only 'posts' is supported."),
       cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'.")
     },
+    ANNOTATE_READ,
     async ({ list, count, type, cursor }) => {
       const agent = getAgent();
       if (!agent) {
@@ -1457,6 +1496,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
       ]).default("posts_with_replies").describe("Filter posts by type. Default includes replies. Options: posts_with_replies (all posts including replies), posts_no_replies (exclude replies), posts_and_author_threads (posts and self-reply threads), posts_with_media (only posts with media), posts_with_video (only posts with video)"),
       cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'.")
     },
+    ANNOTATE_READ,
     async ({ user, count, type, filter, cursor }) => {
       const agent = getAgent();
       if (!agent) {
@@ -1591,6 +1631,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
       cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call."),
       detail: z.enum(["compact", "full"]).default("compact").describe("Output verbosity. 'compact' (default) returns one line per follow with handle, display name, and DID — ~80 bytes per entry. 'full' additionally includes bio and counts; note that at large limits the payload can exceed what some Claude clients will render."),
     },
+    ANNOTATE_READ,
     async ({ user, limit, cursor, detail }) => {
       const agent = getAgent();
       if (!agent) {
@@ -1733,6 +1774,7 @@ ${p?.indexedAt ? `Indexed at: ${new Date(p.indexedAt).toLocaleString()}` : ''}
       user: z.string().describe("The handle or DID of the user (e.g., alice.bsky.social)"),
       limit: z.number().min(1).max(500).default(500).describe("Maximum number of followers to fetch (1-500)"),
     },
+    ANNOTATE_READ,
     async ({ user, limit }) => {
       const agent = getAgent();
       if (!agent) {
@@ -1831,6 +1873,7 @@ ${follower.indexedAt ? `Following since: ${new Date(follower.indexedAt).toLocale
       uri: z.string().describe("The URI of the post to get likes for (e.g., at://did:plc:abcdef/app.bsky.feed.post/123)"),
       limit: z.number().min(1).max(100).default(100).describe("Maximum number of likes to fetch (1-100)"),
     },
+    ANNOTATE_READ,
     async ({ uri, limit }) => {
       const agent = getAgent();
       if (!agent) {
@@ -1895,17 +1938,25 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
 
   server.tool(
     "run-mention-monitor",
-    "Poll Bluesky notifications for mentions of the authenticated user and optionally auto-reply. When poll=false, returns last known state from the mention store (pending/replied/failed/skipped counts). When poll=true, fetches recent mentions, deduplicates against already-handled entries, applies AI preference filtering, and can auto-generate replies.",
+    "Poll Bluesky notifications for mentions of the authenticated user. When poll=false, returns last known state from the mention store (pending/replied/failed/skipped counts). When poll=true, fetches recent mentions, deduplicates against already-handled entries, and applies AI preference filtering. Auto-reply posts a short locally generated acknowledgment — this server makes no LLM call of its own — and only runs when the server process was started with ALLOW_AUTO_REPLY=true.",
     {
       poll: z.boolean().default(true)
         .describe("If true, poll for new mentions; if false, just return last known state"),
       autoReply: z.boolean().default(false)
-        .describe("If true and poll=true, attempt to auto-reply to each mention"),
+        .describe("If true and poll=true, post a locally generated acknowledgment reply. Ignored unless the server process was started with ALLOW_AUTO_REPLY=true; the mention is then left pending."),
       maxMentions: z.number().min(1).max(100).default(10)
         .describe("Max mentions to process per run")
     },
+    ANNOTATE_DESTRUCTIVE,
     async ({ poll, autoReply, maxMentions }) => {
       const agent = getAgent();
+
+      // Posting on the user's behalf is opt-in at the process level: an
+      // autoReply flag inside a tool call must never be enough, on its own, to
+      // publish public replies. Honour it only when the server was started
+      // with ALLOW_AUTO_REPLY=true.
+      const autoReplyEnabled = autoReply && process.env.ALLOW_AUTO_REPLY === "true";
+      const autoReplyBlocked = autoReply && !autoReplyEnabled;
 
       // --- State query mode (poll=false) ---
       if (!poll) {
@@ -1993,7 +2044,7 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
           // AI preference filtering: check if the mentioning author denies inference/training
           const notifAuthorDid = notification.author?.did;
           let aiPrefDenied = false;
-          if (notifAuthorDid && autoReply) {
+          if (notifAuthorDid && autoReplyEnabled) {
             try {
               const allowedMap = await batchCheckAiPreferences(agent as any, [notifAuthorDid]);
               if (!allowedMap.get(notifAuthorDid)) {
@@ -2004,7 +2055,7 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
             }
           }
 
-          if (aiPrefDenied && autoReply) {
+          if (aiPrefDenied && autoReplyEnabled) {
             // "Author opted out" is not a failure: record it as skipped so the store
             // does not treat the mention as handled. If the author later allows
             // inference, a subsequent poll can reply after all.
@@ -2013,30 +2064,16 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
             continue;
           }
 
-          // If autoReply is enabled, attempt to generate and post a reply
-          if (autoReply) {
+          // If auto-reply is enabled (and allowed), generate and post a reply
+          if (autoReplyEnabled) {
             try {
-              // Fetch thread context for richer reply generation
-              let threadContext: any = null;
-              try {
-                threadContext = await fetchThreadContext(agent as any, notifUri);
-              } catch {
-                // Continue without thread context — still generate a basic reply
-              }
-
               const postText = notification.record?.text || '';
               const authorHandle = cleanHandle(notification.author?.handle || 'user');
 
-              // Generate reply text
-              let replyText: string;
-              if (threadContext && threadContext.formattedText) {
-                // Use LLM prompt for context-aware reply
-                const prompt = buildMentionReplyPrompt(authorHandle, postText);
-                // For now use the default generator — actual LLM call would go here
-                replyText = generateMentionReply(authorHandle, postText);
-              } else {
-                replyText = generateMentionReply(authorHandle, postText);
-              }
+              // Locally generated acknowledgment. `buildMentionReplyPrompt()`
+              // in prompts.ts is the scaffold for a host-side LLM reply; this
+              // server never makes that call itself.
+              let replyText = generateMentionReply(authorHandle, postText);
 
               // Validate reply content: non-empty and max 256 chars
               if (!replyText || replyText.trim().length === 0) {
@@ -2121,6 +2158,9 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
         output += `  Scanned ${scannedCount} notifications\n`;
         output += `  Found ${newMentions} new mentions\n`;
         output += `  ${repliedCount} mention(s) replied to automatically\n`;
+        if (autoReplyBlocked) {
+          output += `  Auto-reply refused: this server was not started with ALLOW_AUTO_REPLY=true, so mentions were left pending\n`;
+        }
         output += `  ${skippedCount} mention(s) skipped (already handled)\n`;
         if (policySkippedCount > 0) {
           output += `  ${policySkippedCount} mention(s) skipped (author AI preference opt-out; reconsidered on a later poll)\n`;
@@ -2144,29 +2184,13 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
   );
 
   server.tool(
-    "list-resources",
-    "List all available MCP resources with their descriptions",
-    {},
-    async () => {
-      const formattedResources = resourcesList.map((resource, index) => {
-        return `Resource #${index + 1}:
-Name: ${resource.name}
-URI: ${resource.uri}
-Description: ${resource.description}
----`;
-      }).join("\n\n");
-
-      return mcpSuccessResponse(`Available MCP Resources:\n\n${formattedResources}\n\nTo use these resources, reference them by URI in your prompts or queries.`);
-    }
-  );
-
-  server.tool(
     "get-mention-context",
     "Fetch recent mentions of the authenticated user and return their full conversation thread context with AI preference filtering.",
     {
       limit: z.number().min(1).max(50).default(10)
         .describe("Number of mentions to fetch (1-50)")
     },
+    ANNOTATE_WRITE_IDEMPOTENT,
     async ({ limit }) => {
       const agent = getAgent();
       if (!agent) {
@@ -2309,6 +2333,7 @@ Description: ${resource.description}
       text: z.string().max(256).min(1).describe("The reply content (max 256 chars per Bluesky spec)"),
       embedUrl: z.string().url().optional().describe("Optional URL for link preview embed")
     },
+    ANNOTATE_WRITE,
     async ({ uri, text, embedUrl }) => {
       const agent = getAgent();
       if (!agent) {

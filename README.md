@@ -52,7 +52,8 @@ Here's the current list of tools provided:
 
 ### Utility Tools
 - **convert-url-to-uri**: Converts a Bluesky web URL to an AT URI format that can be used with other tools (e.g., `https://bsky.app/profile/user.bsky.social/post/abc123` -> `at://...`).
-- **list-resources**: Lists all available MCP resources with their descriptions.
+
+Platform information (post limits, facet rules, AI preference categories, tool inventory) is served through the MCP resources API — your client lists it with `resources/list`, no tool call needed.
 
 ### AI Preference Tools
 - **get-ai-preferences**: Retrieves the current user's AI preferences (community.lexicon.preference.ai record), which control whether content from specific users may be read based on categories like inference, training, synthetic content, and embedding.
@@ -138,6 +139,15 @@ Follow the steps to set up MCP with your client of choice. For example, to set u
 ```
 
 For more details about running MCP servers in Claude for desktop, see https://modelcontextprotocol.io/quickstart/user
+
+## Optional environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BSKY_WEB_URL` | `https://bsky.app` | Base URL used to render links back to the web client. Set it for self-hosted frontends. |
+| `MENTION_STORE_PATH` | `.mention-store.json` | Location of the mention de-duplication store. Use one path per account. |
+| `LOG_RESPONSES` | unset | Set to `true` to write tool diagnostics to stderr (never to stdout — that carries MCP traffic). |
+| `ALLOW_AUTO_REPLY` | unset | Must be `true` for `run-mention-monitor`'s `autoReply: true` to actually post replies. Off by default: a tool argument alone can never publish on your behalf. Without it the monitor records mentions as `pending` and says the reply was refused. |
 
 ## Transport
 

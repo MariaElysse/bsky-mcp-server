@@ -71,6 +71,8 @@ All variables are for the single stdio mode — the server listens on no port an
 | `BLUESKY_SERVICE_URL` | Yes | AT Protocol service URL (e.g., `https://bsky.social`) |
 | `BLUESKY_WEB_URL` | No | Web frontend base URL for link formatting (default: `https://bsky.app`) |
 | `MENTION_STORE_PATH` | No | Custom path for mention deduplication JSON store |
+| `LOG_RESPONSES` | No | `true` writes tool diagnostics to stderr (stdout is MCP traffic) |
+| `ALLOW_AUTO_REPLY` | No | Must be `true` for `run-mention-monitor`'s `autoReply` to post replies; otherwise mentions stay `pending` and the refusal is reported |
 
 ## Build & Test Commands
 

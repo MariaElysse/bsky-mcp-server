@@ -4,10 +4,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { AtpAgent } from "@atproto/api";
 import * as dotenv from "dotenv";
+import { createHardenedFetch } from "./atproto-fetch.js";
 import { cleanHandle, mcpErrorResponse, mcpSuccessResponse } from './utils.js';
 import { registerResources } from './resources.js';
 import { registerPrompts } from './prompts.js';
 import {
+  clearPreferenceCache,
   flattenAiPreferences,
   unflattenAiPreferences,
   type AiPreferencesRecord,
@@ -53,7 +55,9 @@ async function initializeBlueskyConnection() {
   }
 
   try {
-    agent = new AtpAgent({ service });
+    // Every AT Protocol call this process makes inherits the timeout/retry
+    // policy (see src/atproto-fetch.ts) — including login and token refresh.
+    agent = new AtpAgent({ service, fetch: createHardenedFetch() });
     const result = await agent.login({ identifier, password });
 
     if (result.success) {
@@ -103,6 +107,7 @@ server.tool(
   {
     user_id: z.string().optional().describe('The target user\'s handle (e.g., alice.bsky.social) or DID (e.g., did:plc:abcdef). If omitted, returns preferences for the authenticated user.'),
   },
+  { readOnlyHint: true, openWorldHint: true },
   async ({ user_id }) => {
     if (!agent) {
       return mcpErrorResponse(
@@ -181,6 +186,7 @@ server.tool(
     category: z.enum(['training', 'inference', 'syntheticContent', 'embedding']).describe('The preference category to update'),
     value: z.enum(['allow', 'deny']).describe('Whether to allow or deny this AI usage type'),
   },
+  { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   async ({ category, value }) => {
     if (!agent) {
       return mcpErrorResponse(
@@ -228,6 +234,10 @@ server.tool(
         rkey,
         record: { ...nestedRecord } as any,
       });
+
+      // Drop the per-DID preference cache so the new settings take effect
+      // immediately instead of after the 5-minute TTL.
+      clearPreferenceCache();
 
       const label = CATEGORY_LABELS[category] ?? category;
       return mcpSuccessResponse(

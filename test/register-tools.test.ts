@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Agent } from "@atproto/api";
 import { registerTools, AgentProvider } from "../src/tools.js";
+import { clearPreferenceCache } from "../src/ai-preferences.js";
 import {
   convertBskyUrlToAtUri,
   debugPostStructure,
@@ -48,10 +49,15 @@ const EXPECTED_TOOLS = [
   "get-post-likes",
   "get-mention-context",
   "run-mention-monitor",
-  "list-resources",
 ];
 
 async function harness(provider: AgentProvider) {
+  // AI-preference verdicts (including "this author has no record") are cached
+  // process-wide for 5 minutes, so each harness starts from an empty cache:
+  // otherwise a DID mocked as allowing in one case would be reused as allowing
+  // in the next, whatever this case's fake agent says.
+  clearPreferenceCache();
+
   const server = new McpServer({ name: "test", version: "0.0.0" });
   registerTools(server, provider, provider);
 
@@ -67,7 +73,29 @@ async function testExpectedToolSet() {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name).sort();
     assert.deepEqual(names, [...EXPECTED_TOOLS].sort(),
-      `registered tool set drifted from the 26 expected names`);
+      `registered tool set drifted from the ${EXPECTED_TOOLS.length} expected names`);
+  } finally {
+    await close();
+  }
+}
+
+async function testToolAnnotations() {
+  const { client, close } = await harness(() => null);
+  try {
+    const { tools } = await client.listTools();
+    const byName = new Map(tools.map((t) => [t.name, t]));
+    for (const name of EXPECTED_TOOLS) {
+      const annotations = byName.get(name)!.annotations;
+      assert.ok(annotations, `${name} must declare annotations`);
+      assert.equal(typeof annotations.readOnlyHint, "boolean", `${name} needs readOnlyHint`);
+      assert.equal(typeof annotations.openWorldHint, "boolean", `${name} needs openWorldHint`);
+    }
+    assert.equal(byName.get("get-timeline-posts")!.annotations!.readOnlyHint, true);
+    assert.equal(byName.get("convert-url-to-uri")!.annotations!.openWorldHint, false);
+    assert.equal(byName.get("create-post")!.annotations!.readOnlyHint, false);
+    assert.equal(byName.get("create-post")!.annotations!.destructiveHint, false);
+    assert.equal(byName.get("unfollow-user")!.annotations!.destructiveHint, true);
+    assert.equal(byName.get("run-mention-monitor")!.annotations!.destructiveHint, true);
   } finally {
     await close();
   }
@@ -759,7 +787,7 @@ async function testFollowsAndFollowers() {
   assert.match(text(followers), /Follower/);
 }
 
-async function testPostLikesAndResourceTool() {
+async function testPostLikes() {
   const uri = "at://did:plc:liked-post-extra/app.bsky.feed.post/liked";
   const agent: any = {
     app: { bsky: { feed: {
@@ -779,9 +807,6 @@ async function testPostLikesAndResourceTool() {
   assert.match(text(likes), /More likes are available/);
   assert.match(text(likes), /\.\.\./);
 
-  const resources = await callTool({}, "list-resources");
-  assert.match(assertSuccess(resources), /Available MCP Resources/);
-  assert.match(text(resources), /bluesky-platform-info/);
 }
 
 
@@ -797,8 +822,9 @@ async function main() {
     ["URL conversion, feed search, trends, like, and follow", testUrlSearchTrendsAndInteractions],
     ["pinned feed and list formatting", testPinnedFeeds],
     ["self/AppView follows and followers", testFollowsAndFollowers],
-    ["post likes and list-resources", testPostLikesAndResourceTool],
-    ["registers exactly the expected 26 tools", testExpectedToolSet],
+    ["post likes pagination", testPostLikes],
+    ["registers exactly the expected 25 tools", testExpectedToolSet],
+    ["every tool declares MCP annotations", testToolAnnotations],
     ["tools error out when getAgent returns null", testNullAgentReturnsError],
     ["getAgent is resolved per tool call, not cached", testAgentIsResolvedPerCall],
     ["tool handlers invoke methods on the resolved agent", testAgentMethodIsInvoked],
