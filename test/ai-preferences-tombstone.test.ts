@@ -46,6 +46,8 @@ function makeTombstone(originalItem: any): any {
 // ---------------------------------------------------------------------------
 
 let filterPostsByAiPreferences: any;
+let batchCheckAiPreferenceRecords: any;
+let clearPreferenceCache: () => void;
 let preprocessPosts: any;
 let filterThreadByAiPreferences: any;
 let formatPostThreadWithAiPrefs: any;
@@ -58,6 +60,8 @@ let processThreadViewPost: any;
 async function loadModules() {
   const aiPrefs = await import("../src/ai-preferences.js");
   filterPostsByAiPreferences = aiPrefs.filterPostsByAiPreferences;
+  batchCheckAiPreferenceRecords = aiPrefs.batchCheckAiPreferenceRecords;
+  clearPreferenceCache = aiPrefs.clearPreferenceCache;
 
   const llm = await import("../src/llm-preprocessor.js");
   preprocessPosts = llm.preprocessPosts;
@@ -173,6 +177,87 @@ async function test_filterPostsByAiPreferences_deniedCategories_empty_when_no_re
   const tombstone = result.filtered[0];
   // When no deniedRecords provided, deniedCategories should be undefined (not set)
   assert.ok(tombstone.__aiPrefExcluded);
+}
+
+/**
+ * End-to-end single pass: batchCheckAiPreferenceRecords() hands the filter both
+ * the verdict and the record, so tombstones get their deniedCategories without
+ * the second round of getRecord lookups the tools layer used to make.
+ */
+async function test_batchCheckAiPreferenceRecords_feeds_tombstones_in_one_pass() {
+  clearPreferenceCache();
+
+  const deniedDid = "did:plc:tomb-single-pass-denied";
+  const allowedDid = "did:plc:tomb-single-pass-allowed";
+  const missingDid = "did:plc:tomb-single-pass-missing";
+
+  const items = [
+    makeFeedItem({ handle: "denied.test", did: deniedDid }),
+    makeFeedItem({ handle: "allowed.test", did: allowedDid }),
+    makeFeedItem({ handle: "missing.test", did: missingDid }),
+  ];
+
+  let calls = 0;
+  const records = new Map<string, unknown>([
+    [
+      deniedDid,
+      {
+        preferences: {
+          inference: { allow: false },
+          training: { allow: false },
+          syntheticContent: { allow: true },
+        },
+      },
+    ],
+    [allowedDid, { preferences: { inference: { allow: true }, training: { allow: true } } }],
+  ]);
+  const agent = {
+    get calls() {
+      return calls;
+    },
+    com: {
+      atproto: {
+        repo: {
+          getRecord: async ({ repo }: { repo: string }) => {
+            calls++;
+            const value = records.get(repo);
+            return value === undefined
+              ? { success: false }
+              : { success: true, data: { value } };
+          },
+        },
+      },
+    },
+  };
+
+  const checks = await batchCheckAiPreferenceRecords(agent, [deniedDid, allowedDid, missingDid]);
+  assert.equal(agent.calls, 3, "one lookup per author and nothing more");
+
+  const allowedMap = new Map<string, boolean>();
+  const deniedRecords = new Map<string, any>();
+  for (const [did, check] of checks) {
+    allowedMap.set(did, check.allowed);
+    if (!check.allowed && check.record) deniedRecords.set(did, check.record);
+  }
+
+  const result = filterPostsByAiPreferences(items, allowedMap, deniedRecords);
+  assert.equal(result.filtered.length, 3, "tombstones replace denied posts in place");
+  assert.equal(result.skippedCount, 1);
+  assert.ok(result.filtered[0].__aiPrefExcluded, "the denied author's post becomes a tombstone");
+  assert.deepEqual(result.filtered[0].deniedCategories, ["inference", "training"]);
+  assert.ok(!result.filtered[1].__aiPrefExcluded, "the allowed author's post stays visible");
+  assert.ok(!result.filtered[2].__aiPrefExcluded, "an author with no record stays visible");
+
+  // Re-filtering the same authors must not repeat the per-author fetch.
+  await batchCheckAiPreferenceRecords(agent, [deniedDid, allowedDid, missingDid]);
+  assert.equal(agent.calls, 3, "cached authors cost zero extra getRecord calls");
+
+  const xml = preprocessPosts(result.filtered as any).replace(/posted_at="[^"]*"/g, 'posted_at="<D>"');
+  const tombstones = xml.match(/<excluded_post /g) ?? [];
+  assert.equal(tombstones.length, 1, "exactly one tombstone is rendered");
+  assert.ok(xml.includes('reason="ai_preferences"'));
+  assert.ok(xml.includes('author_handle="denied.test"'));
+  assert.ok(xml.includes('author_handle="missing.test"'), "the no-record author is still formatted");
 }
 
 async function test_preprocessPosts_with_tombstones_preserves_position() {
@@ -909,6 +994,7 @@ async function main() {
     ["filterPostsByAiPreferences passes through items without author info", test_filterPostsByAiPreferences_items_without_author_info_pass_through],
     ["filterPostsByAiPreferences populates deniedCategories from record", test_filterPostsByAiPreferences_deniedCategories_populated],
     ["filterPostsByAiPreferences deniedCategories undefined when no record provided", test_filterPostsByAiPreferences_deniedCategories_empty_when_no_record],
+    ["batchCheckAiPreferenceRecords feeds tombstones from a single fetch pass", test_batchCheckAiPreferenceRecords_feeds_tombstones_in_one_pass],
     ["preprocessPosts with tombstones preserves position", test_preprocessPosts_with_tombstones_preserves_position],
     ["preprocessPosts tombstone XML format is correct", test_preprocessPosts_tombstone_xml_format],
     ["filterThreadByAiPreferences requested post always shown", test_filterThreadByAiPreferences_requested_post_always_shown],

@@ -6,16 +6,26 @@ import { runTests } from "./test-helpers.js";
  * Covers:
  *  (1) flattenAiPreferences / unflattenAiPreferences round-trips
  *  (2) READ_PREFERENCES constant shape
- *  (3) isContentAllowed cache behaviour
- *  (4) filterPostsByAiPreferences core logic
- *  (5) getDidsFromThread extraction from thread structures
- *  (6) filterThreadByAiPreferences filtering of denied authors
- *  (7) Integration: all 7 content tools enforce AI preferences
- *  (8) Edge cases: malformed input, empty arrays, fetch failures
+ *  (3) cache behaviour: memoized lookups, negative caching, LRU eviction,
+ *      TTL expiry, and clearPreferenceCache()
+ *  (4) single-pass records API: record + deniedCategories without a second fetch
+ *  (5) filterPostsByAiPreferences core logic
+ *  (6) getDidsFromThread extraction from thread structures
+ *  (7) filterThreadByAiPreferences filtering of denied authors
+ *  (8) Integration: all 7 content tools enforce AI preferences
+ *  (9) Edge cases: malformed input, empty arrays, malformed records, fetch failures
  */
 
 import assert from "node:assert/strict";
-import { batchCheckAiPreferences, checkAiPreference, fetchAiPreferences, isContentAllowed } from "../src/ai-preferences.js";
+import type { Agent } from "@atproto/api";
+import {
+  batchCheckAiPreferences,
+  batchCheckAiPreferenceRecords,
+  checkAiPreference,
+  clearPreferenceCache,
+  fetchAiPreferences,
+  type AiPreferencesRecord,
+} from "../src/ai-preferences.js";
 
 // ---------------------------------------------------------------------------
 // Helpers — we import the compiled JS so tests run without a test framework.
@@ -117,30 +127,358 @@ async function testReadPreferencesConstant() {
 }
 
 // ---------------------------------------------------------------------------
-// (3) isContentAllowed cache behaviour
+// (3) cache behaviour — memoized lookups, negative results, LRU eviction
 // ---------------------------------------------------------------------------
 
-async function testIsContentAllowedMiss() {
-  // Cache miss — should return false (will fetch next time)
-  const result = aiPrefs.isContentAllowed("did:plc:notincache");
-  assert.equal(result, false);
+/**
+ * Build an agent stub whose com.atproto.repo.getRecord resolves like
+ * @atproto/api. `calls` counts the getRecord lookups, which is how these tests
+ * observe the module's caching without reaching into its private Map.
+ */
+function agentFor(
+  recordByDid: Map<string, unknown>,
+  options: { throwFor?: Set<string> } = {}
+): Agent & { calls: number } {
+  let calls = 0;
+  return {
+    get calls() {
+      return calls;
+    },
+    com: {
+      atproto: {
+        repo: {
+          getRecord: async ({ repo }: { repo: string }) => {
+            calls++;
+            if (options.throwFor?.has(repo)) {
+              throw new Error("repository unavailable");
+            }
+            const value = recordByDid.get(repo);
+            return value === undefined
+              ? { success: false }
+              : { success: true, data: { value } };
+          },
+        },
+      },
+    },
+  } as unknown as Agent & { calls: number };
 }
 
-async function testIsContentAllowedHitAllow() {
-  // Manually seed the cache with an allowed entry
-  const did = "did:plc:testallow";
-  const entry = {
-    record: { training: "allow", inference: "allow" },
-    expiresAt: Date.now() + 60_000,
-  };
-  // Access the internal cache — we'll test via checkAiPreference instead.
-  // Since isContentAllowed reads from a private Map, we verify through
-  // batchCheckAiPreferences which populates it.
-  assert.ok(true); // placeholder — real coverage in integration tests
+async function testCacheHitAndDeny() {
+  clearPreferenceCache();
+
+  const did = "did:plc:cache-hit-extra";
+  const agent = agentFor(new Map([[did, { preferences: { inference: { allow: true }, training: { allow: true } } }]]));
+
+  assert.equal(await checkAiPreference(agent, did), true);
+  assert.equal(agent.calls, 1, "the first check should fetch the record");
+
+  // The second check must be served by the cache, with the same verdict.
+  assert.equal(await checkAiPreference(agent, did), true);
+  assert.equal(agent.calls, 1, "a fresh cache entry should not be refetched");
+
+  // A cached denial is observable the same way. Use a unique DID so the
+  // module-level cache from other suites cannot affect this assertion.
+  const deniedDid = "did:plc:cache-deny-extra";
+  const deniedAgent = agentFor(new Map([[deniedDid, { preferences: { inference: { allow: false } } }]]));
+  assert.equal(await checkAiPreference(deniedAgent, deniedDid), false);
+  assert.equal(await checkAiPreference(deniedAgent, deniedDid), false);
+  assert.equal(deniedAgent.calls, 1, "a cached denial should not be refetched");
+}
+
+async function testCheckPreferenceFetchFallbacksAndCustomCategories() {
+  clearPreferenceCache();
+
+  const missingDid = "did:plc:missing-extra";
+  const missingAgent = agentFor(new Map());
+  assert.equal(await checkAiPreference(missingAgent, missingDid), true, "missing records are privacy-first allow");
+
+  const throwingDid = "did:plc:throwing-extra";
+  const throwingAgent = agentFor(new Map(), { throwFor: new Set([throwingDid]) });
+  assert.equal(await checkAiPreference(throwingAgent, throwingDid), true, "fetch errors are privacy-first allow");
+
+  const embeddingDid = "did:plc:embedding-extra";
+  const embeddingAgent = agentFor(new Map([[embeddingDid, {
+    preferences: { embedding: { allow: false }, inference: { allow: true } },
+  }]]));
+  assert.equal(await checkAiPreference(embeddingAgent, embeddingDid, ["embedding"]), false);
+  assert.equal(await checkAiPreference(embeddingAgent, embeddingDid, ["inference"]), true);
+
+  const directFailure = await fetchAiPreferences(agentFor(new Map()), "did:plc:direct-missing-extra");
+  assert.equal(directFailure, null);
+}
+
+async function testBatchUsesCachedEntriesAndDeduplicatesResults() {
+  clearPreferenceCache();
+
+  const cachedDid = "did:plc:batch-cached-extra";
+  const freshDid = "did:plc:batch-fresh-extra";
+  const agent = agentFor(new Map([
+    [cachedDid, { preferences: { inference: { allow: true } } }],
+    [freshDid, { preferences: { training: { allow: false } } }],
+  ]));
+
+  // Prime the module cache, then make a batch request containing the cached DID
+  // twice. The batch path should use the cache and fetch only the fresh DID.
+  assert.equal(await checkAiPreference(agent, cachedDid), true);
+  const callsBefore = agent.calls;
+  const result = await batchCheckAiPreferences(agent, [cachedDid, cachedDid, freshDid]);
+  assert.equal(agent.calls, callsBefore + 1);
+  assert.equal(result.get(cachedDid), true);
+  assert.equal(result.get(freshDid), false);
+  assert.equal(result.size, 2, "the result map should contain one entry per DID");
+}
+
+/** A PDS that throws is looked up once per TTL, and the verdict stays allowed. */
+async function testNegativeCacheFailedLookupFetchedOnce() {
+  clearPreferenceCache();
+
+  const first = "did:plc:neg-throw-a";
+  const second = "did:plc:neg-throw-b";
+  // A feed page whose authors repeat — the unreachable PDS is hit once per
+  // distinct DID, not once per post.
+  const dids = [first, second, first, second, first];
+  const agent = agentFor(new Map(), { throwFor: new Set([first, second]) });
+
+  const checks = await batchCheckAiPreferenceRecords(agent, dids);
+  assert.equal(agent.calls, 2, "one lookup per distinct DID");
+  for (const did of dids) {
+    assert.equal(checks.get(did)?.allowed, true, "a failed lookup never denies content");
+    assert.equal(checks.get(did)?.record, null);
+  }
+
+  // The next page over the same authors must not re-hit the PDS.
+  const allowedMap = await batchCheckAiPreferences(agent, dids);
+  assert.equal(agent.calls, 2, "failed lookups are memoized for the whole TTL");
+  for (const did of dids) {
+    assert.equal(allowedMap.get(did), true, "the privacy-first fallback survives caching");
+  }
+  assert.equal(await checkAiPreference(agent, first), true);
+  assert.equal(agent.calls, 2, "checkAiPreference serves the negative entry from the cache too");
+}
+
+/** A DID with no preference record is memoized exactly like a record is. */
+async function testNegativeCacheNoRecordFetchedOnce() {
+  clearPreferenceCache();
+
+  const missing = "did:plc:neg-norecord-a";
+  const agent = agentFor(new Map());
+
+  assert.equal(await checkAiPreference(agent, missing), true);
+  assert.equal(agent.calls, 1, "the first lookup of a no-record DID hits the PDS");
+
+  const checks = await batchCheckAiPreferenceRecords(agent, [missing, missing]);
+  assert.equal(agent.calls, 1, "a no-record verdict is cached like a denial or an allowance");
+  assert.equal(checks.get(missing)?.allowed, true);
+  assert.equal(checks.get(missing)?.record, null);
+  assert.deepEqual(checks.get(missing)?.deniedCategories, []);
+  assert.equal(await fetchAiPreferences(agent, missing), null, "fetchAiPreferences reuses the cached miss");
+  assert.equal(agent.calls, 1);
+}
+
+/**
+ * The cache is bounded to MAX_PREF_CACHE_ENTRIES with LRU eviction, and a read
+ * refreshes an entry's recency instead of refetching it.
+ */
+async function testCacheEvictsLeastRecentlyUsedAtCap() {
+  clearPreferenceCache();
+
+  // Keep in sync with MAX_PREF_CACHE_ENTRIES in src/ai-preferences.ts.
+  const CAP = 5000;
+  const record = { preferences: { inference: { allow: true }, training: { allow: true } } };
+  const dids = Array.from({ length: CAP }, (_, i) => `did:plc:lru-${i}`);
+
+  const fillAgent = agentFor(new Map(dids.map((did) => [did, record])));
+  const checks = await batchCheckAiPreferenceRecords(fillAgent, dids);
+  assert.equal(checks.size, CAP, "every DID gets a verdict");
+  assert.equal(fillAgent.calls, CAP, "each DID is looked up once while filling the cache");
+
+  // Touch the oldest entry so it is no longer the least recently used one.
+  assert.equal(await checkAiPreference(fillAgent, dids[0]), true);
+  assert.equal(fillAgent.calls, CAP, "a read refreshes recency instead of refetching");
+
+  // One more insert must evict exactly one entry — and not the DID just read.
+  assert.equal(await checkAiPreference(fillAgent, "did:plc:lru-overflow"), true);
+  assert.equal(fillAgent.calls, CAP + 1, "the new DID had to be fetched");
+
+  const survivorAgent = agentFor(new Map([[dids[0], record]]));
+  assert.equal(await checkAiPreference(survivorAgent, dids[0]), true);
+  assert.equal(survivorAgent.calls, 0, "the most recently touched entry survives eviction");
+
+  const evictedAgent = agentFor(new Map([[dids[1], record]]));
+  assert.equal(await checkAiPreference(evictedAgent, dids[1]), true);
+  assert.equal(evictedAgent.calls, 1, "the least recently touched entry was evicted");
+
+  // The cap holds: re-checking the original DIDs refetches only what was evicted.
+  const refillAgent = agentFor(new Map(dids.map((did) => [did, record])));
+  await batchCheckAiPreferenceRecords(refillAgent, dids);
+  assert.equal(refillAgent.calls, 1, "the cache never exceeds MAX_PREF_CACHE_ENTRIES entries");
+}
+
+/** clearPreferenceCache() drops positive and negative entries alike. */
+async function testClearPreferenceCacheResetsPositiveAndNegative() {
+  clearPreferenceCache();
+
+  const denied = "did:plc:clear-positive";
+  const missing = "did:plc:clear-negative";
+  const agent = agentFor(
+    new Map([[denied, { preferences: { inference: { allow: false }, training: { allow: true } } }]])
+  );
+
+  assert.equal(await checkAiPreference(agent, denied), false);
+  assert.equal(await checkAiPreference(agent, missing), true);
+  assert.equal(agent.calls, 2, "both verdicts are memoized");
+
+  clearPreferenceCache();
+
+  assert.equal(await checkAiPreference(agent, denied), false);
+  assert.equal(await checkAiPreference(agent, missing), true);
+  assert.equal(agent.calls, 4, "clear drops the positive and the negative entry");
+
+  // A DID whose lookup previously failed can flip to a denial once its record
+  // becomes readable — proving the negative entry really was dropped.
+  const flaky = "did:plc:clear-flaky";
+  const failing = agentFor(new Map(), { throwFor: new Set([flaky]) });
+  assert.equal(await checkAiPreference(failing, flaky), true, "a failed lookup allows");
+  clearPreferenceCache();
+  const fixed = agentFor(new Map([[flaky, { preferences: { training: { allow: false } } }]]));
+  assert.equal(await checkAiPreference(fixed, flaky), false, "the fresh record is read after clear");
+}
+
+/** Expired entries are dropped when touched, then repopulated by a new lookup. */
+async function testCacheExpiryRefetchesAfterTtl() {
+  clearPreferenceCache();
+
+  const recordDid = "did:plc:ttl-record";
+  const missingDid = "did:plc:ttl-negative";
+  const agent = agentFor(
+    new Map([[recordDid, { preferences: { inference: { allow: false }, training: { allow: true } } }]])
+  );
+
+  assert.equal(await checkAiPreference(agent, recordDid), false);
+  assert.equal(await checkAiPreference(agent, missingDid), true);
+  assert.equal(agent.calls, 2);
+
+  const realNow = Date.now;
+  try {
+    // Step past PREF_CACHE_TTL_MS (5 minutes).
+    Date.now = () => realNow() + 5 * 60_000 + 1_000;
+    assert.equal(await checkAiPreference(agent, recordDid), false);
+    assert.equal(await checkAiPreference(agent, missingDid), true);
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(agent.calls, 4, "expired entries refetch — positive and negative alike");
+
+  assert.equal(await checkAiPreference(agent, recordDid), false);
+  assert.equal(agent.calls, 4, "the refetched entries are cached again");
 }
 
 // ---------------------------------------------------------------------------
-// (4) filterPostsByAiPreferences core logic
+// (4) single-pass records API — record + deniedCategories, no second fetch
+// ---------------------------------------------------------------------------
+
+/**
+ * The tools layer used to call batchCheckAiPreferences() and then fetch each
+ * denied DID again just to populate deniedCategories. The records API must
+ * return the record alongside the verdict with zero extra getRecord calls.
+ */
+async function testBatchRecordsReturnsRecordWithoutSecondFetch() {
+  clearPreferenceCache();
+
+  const deniedDid = "did:plc:records-denied";
+  const allowedDid = "did:plc:records-allowed";
+  const missingDid = "did:plc:records-missing";
+  const agent = agentFor(new Map([
+    [deniedDid, {
+      preferences: {
+        inference: { allow: false },
+        training: { allow: false },
+        syntheticContent: { allow: true },
+        embedding: { allow: true },
+      },
+    }],
+    [allowedDid, {
+      preferences: { inference: { allow: true }, training: { allow: true }, embedding: { allow: false } },
+    }],
+  ]));
+
+  const checks = await batchCheckAiPreferenceRecords(agent, [deniedDid, allowedDid, missingDid]);
+  assert.equal(agent.calls, 3, "the batch is the only pass — one lookup per DID");
+  assert.equal(checks.size, 3);
+
+  const deniedCheck = checks.get(deniedDid);
+  assert.ok(deniedCheck, "the denied DID should have a check");
+  assert.equal(deniedCheck.allowed, false);
+  assert.deepEqual(deniedCheck.record, {
+    training: "deny",
+    inference: "deny",
+    syntheticContent: "allow",
+    embedding: "allow",
+  });
+  assert.deepEqual(deniedCheck.deniedCategories, ["inference", "training"]);
+
+  const allowedCheck = checks.get(allowedDid);
+  assert.ok(allowedCheck);
+  assert.equal(allowedCheck.allowed, true);
+  assert.deepEqual(allowedCheck.deniedCategories, []);
+  assert.equal(allowedCheck.record?.embedding, "deny", "the whole record is returned, not just the verdict");
+
+  const missingCheck = checks.get(missingDid);
+  assert.ok(missingCheck);
+  assert.equal(missingCheck.allowed, true, "no record is a privacy-first allow");
+  assert.equal(missingCheck.record, null);
+  assert.deepEqual(missingCheck.deniedCategories, []);
+
+  // Verdicts and records are already in hand — nothing else may hit the PDS.
+  const callsAfterBatch = agent.calls;
+  const allowedMap = await batchCheckAiPreferences(agent, [deniedDid, allowedDid, missingDid]);
+  assert.equal(agent.calls, callsAfterBatch, "the boolean wrapper adds no extra getRecord calls");
+  assert.equal(allowedMap.get(deniedDid), false);
+  assert.equal(allowedMap.get(allowedDid), true);
+  assert.equal(allowedMap.get(missingDid), true);
+  assert.equal(await checkAiPreference(agent, deniedDid), false);
+  assert.equal(agent.calls, callsAfterBatch, "single checks reuse the same cache entries");
+
+  // The records feed straight into filterPostsByAiPreferences' deniedRecords map.
+  const deniedRecords = new Map<string, AiPreferencesRecord>();
+  for (const [did, check] of checks) {
+    if (!check.allowed && check.record) deniedRecords.set(did, check.record);
+  }
+  const { filtered, skippedCount } = aiPrefs.filterPostsByAiPreferences(
+    [{ post: { author: { did: deniedDid } } }],
+    allowedMap,
+    deniedRecords
+  );
+  assert.equal(skippedCount, 1);
+  assert.deepEqual(filtered[0].deniedCategories, ["inference", "training"]);
+}
+
+/** batchCheckAiPreferenceRecords honours a custom category list. */
+async function testBatchRecordsCustomCategories() {
+  clearPreferenceCache();
+
+  const did = "did:plc:records-embedding";
+  const agent = agentFor(
+    new Map([[did, { preferences: { inference: { allow: true }, embedding: { allow: false } } }]])
+  );
+
+  const readChecks = await batchCheckAiPreferenceRecords(agent, [did]);
+  assert.equal(readChecks.get(did)?.allowed, true, "embedding is not a read preference");
+  assert.deepEqual(readChecks.get(did)?.deniedCategories, []);
+
+  const embeddingChecks = await batchCheckAiPreferenceRecords(agent, [did], ["embedding"]);
+  assert.equal(agent.calls, 1, "the record is cached, not refetched per category set");
+  assert.equal(embeddingChecks.get(did)?.allowed, false);
+  assert.deepEqual(embeddingChecks.get(did)?.deniedCategories, ["embedding"]);
+  assert.equal(embeddingChecks.get(did)?.record?.inference, "allow");
+
+  const wrapper = await batchCheckAiPreferences(agent, [did], ["embedding"]);
+  assert.equal(wrapper.get(did), false);
+  assert.equal(agent.calls, 1, "the wrapper keeps the single-pass guarantee");
+}
+
+// ---------------------------------------------------------------------------
+// (5) filterPostsByAiPreferences core logic
 // ---------------------------------------------------------------------------
 
 async function testFilterKeepAll() {
@@ -197,7 +535,7 @@ async function testFilterEmptyInput() {
 }
 
 // ---------------------------------------------------------------------------
-// (5) getDidsFromThread extraction
+// (6) getDidsFromThread extraction
 // ---------------------------------------------------------------------------
 
 async function testGetDidsSimple() {
@@ -255,7 +593,7 @@ async function testGetDidsNullInput() {
 }
 
 // ---------------------------------------------------------------------------
-// (6) filterThreadByAiPreferences filtering
+// (7) filterThreadByAiPreferences filtering
 // ---------------------------------------------------------------------------
 
 async function testFilterThreadKeepAll() {
@@ -374,7 +712,7 @@ async function testFilterThreadUndefinedAllowed() {
 }
 
 // ---------------------------------------------------------------------------
-// (7) Integration: all 7 content tools enforce AI preferences
+// (8) Integration: all 7 content tools enforce AI preferences
 // ---------------------------------------------------------------------------
 
 async function testIntegrationTimelineEnforcesPrefs() {
@@ -526,7 +864,7 @@ async function testIntegrationGetNotificationsEnforcesPrefs() {
 }
 
 // ---------------------------------------------------------------------------
-// (8) Edge cases: malformed input, empty arrays, fetch failures
+// (9) Edge cases: malformed input, empty arrays, fetch failures
 // ---------------------------------------------------------------------------
 
 async function testFilterMalformedPostNoAuthor() {
@@ -584,99 +922,67 @@ async function testFilterThreadMalformed() {
   assert.ok(result2 !== null); // kept as-is (malformed)
 }
 
-// ---------------------------------------------------------------------------
+/**
+ * A malformed preference record must not throw and must not deny content —
+ * the untyped getRecord value is validated, and anything unexpected counts as
+ * "no record" (which is cached, so a hostile record is fetched once).
+ */
+async function testMalformedRecordsAllowWithoutThrowing() {
+  clearPreferenceCache();
 
-// Additional cache, single-DID, and repository-failure paths.
-function agentFor(recordByDid: Map<string, any>, options: { throwFor?: Set<string> } = {}) {
-  let calls = 0;
-  return {
-    get calls() {
-      return calls;
-    },
-    com: {
-      atproto: {
-        repo: {
-          getRecord: async ({ repo }: { repo: string }) => {
-            calls++;
-            if (options.throwFor?.has(repo)) {
-              throw new Error("repository unavailable");
-            }
-            const value = recordByDid.get(repo);
-            return value === undefined
-              ? { success: false }
-              : { success: true, data: { value } };
-          },
-        },
-      },
-    },
-  } as any;
+  const garbage: Array<[string, unknown]> = [
+    ["string-value", "not-a-record"],
+    ["null-value", null],
+    ["array-value", [{ allow: true }]],
+    ["preferences-string", { preferences: "yes" }],
+    ["preferences-array", { preferences: [{ allow: true }] }],
+    ["category-boolean", { preferences: { inference: true } }],
+    ["category-allow-string", { preferences: { inference: { allow: "false" } } }],
+  ];
+
+  for (const [label, value] of garbage) {
+    const did = `did:plc:malformed-${label}`;
+    const agent = agentFor(new Map([[did, value]]));
+
+    assert.equal(await fetchAiPreferences(agent, did), null, `${label}: treated as no record`);
+    assert.equal(await checkAiPreference(agent, did), true, `${label}: allowed, never silently denied`);
+    const checks = await batchCheckAiPreferenceRecords(agent, [did]);
+    assert.equal(checks.get(did)?.allowed, true, `${label}: batch verdict stays allowed`);
+    assert.equal(checks.get(did)?.record, null, `${label}: no record to expose`);
+    assert.equal(agent.calls, 1, `${label}: the malformed result is cached, not refetched`);
+  }
 }
 
-async function testCacheHitAndDeny() {
-  const did = "did:plc:cache-hit-extra";
-  const agent = agentFor(new Map([[did, { preferences: { inference: { allow: true }, training: { allow: true } } }]]));
+/** A record that sets no categories still allows everything (unset is not a deny). */
+async function testRecordWithNoCategoriesSetAllows() {
+  clearPreferenceCache();
 
-  assert.equal(await checkAiPreference(agent, did), true);
-  assert.equal(agent.calls, 1, "the first check should fetch the record");
-  assert.equal(isContentAllowed(did), true, "an allowed cached record should be allowed");
-
-  // A cached denial is observable through both cache helpers. Use a unique DID
-  // so the module-level cache from other suites cannot affect this assertion.
-  const deniedDid = "did:plc:cache-deny-extra";
-  const deniedAgent = agentFor(new Map([[deniedDid, { preferences: { inference: { allow: false } } }]]));
-  assert.equal(await checkAiPreference(deniedAgent, deniedDid), false);
-  assert.equal(isContentAllowed(deniedDid), false);
-  assert.equal(deniedAgent.calls, 1);
-}
-
-async function testCheckPreferenceFetchFallbacksAndCustomCategories() {
-  const missingDid = "did:plc:missing-extra";
-  const missingAgent = agentFor(new Map());
-  assert.equal(await checkAiPreference(missingAgent, missingDid), true, "missing records are privacy-first allow");
-
-  const throwingDid = "did:plc:throwing-extra";
-  const throwingAgent = agentFor(new Map(), { throwFor: new Set([throwingDid]) });
-  assert.equal(await checkAiPreference(throwingAgent, throwingDid), true, "fetch errors are privacy-first allow");
-
-  const embeddingDid = "did:plc:embedding-extra";
-  const embeddingAgent = agentFor(new Map([[embeddingDid, {
-    preferences: { embedding: { allow: false }, inference: { allow: true } },
-  }]]));
-  assert.equal(await checkAiPreference(embeddingAgent, embeddingDid, ["embedding"]), false);
-  assert.equal(await checkAiPreference(embeddingAgent, embeddingDid, ["inference"]), true);
-
-  const directFailure = await fetchAiPreferences(agentFor(new Map()), "did:plc:direct-missing-extra");
-  assert.equal(directFailure, null);
-}
-
-async function testBatchUsesCachedEntriesAndDeduplicatesResults() {
-  const cachedDid = "did:plc:batch-cached-extra";
-  const freshDid = "did:plc:batch-fresh-extra";
+  const bareDid = "did:plc:empty-record-bare";
+  const emptyDid = "did:plc:empty-record-prefs";
   const agent = agentFor(new Map([
-    [cachedDid, { preferences: { inference: { allow: true } } }],
-    [freshDid, { preferences: { training: { allow: false } } }],
+    [bareDid, {}],
+    [emptyDid, { preferences: {} }],
   ]));
 
-  // Prime the module cache, then make a batch request containing the cached DID
-  // twice. The batch path should use the cache and fetch only the fresh DID.
-  assert.equal(await checkAiPreference(agent, cachedDid), true);
-  const callsBefore = agent.calls;
-  const result = await batchCheckAiPreferences(agent, [cachedDid, cachedDid, freshDid]);
-  assert.equal(agent.calls, callsBefore + 1);
-  assert.equal(result.get(cachedDid), true);
-  assert.equal(result.get(freshDid), false);
-  assert.equal(result.size, 2, "the result map should contain one entry per DID");
+  for (const did of [bareDid, emptyDid]) {
+    const record = await fetchAiPreferences(agent, did);
+    assert.ok(record, `${did}: a record with no categories is still a record`);
+    assert.equal(record.inference, "allow");
+    assert.equal(record.training, "allow");
+    assert.equal(await checkAiPreference(agent, did), true);
+    const checks = await batchCheckAiPreferenceRecords(agent, [did]);
+    assert.equal(checks.get(did)?.allowed, true);
+    assert.deepEqual(checks.get(did)?.deniedCategories, []);
+  }
+  assert.equal(agent.calls, 2, "each author's record is fetched exactly once");
 }
 
-
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 
 async function main() {
   const cases: Array<[string, () => Promise<void>]> = [
-    ["AI preference cache hit allow/deny", testCacheHitAndDeny],
-    ["AI preference single-check fallbacks and custom categories", testCheckPreferenceFetchFallbacksAndCustomCategories],
-    ["AI preference batch cache path", testBatchUsesCachedEntriesAndDeduplicatesResults],
     // (1) flatten/unflatten round-trips
     ["flattenAiPreferences — all allow", testFlattenAllAllow],
     ["flattenAiPreferences — all deny", testFlattenAllDeny],
@@ -686,22 +992,48 @@ async function main() {
     // (2) READ_PREFERENCES constant
     ["READ_PREFERENCES includes inference and training only", testReadPreferencesConstant],
 
-    // (3) isContentAllowed cache behaviour
-    ["isContentAllowed returns false on cache miss", testIsContentAllowedMiss],
+    // (3) cache behaviour — memoized lookups, negative results, LRU eviction
+    ["AI preference cache hit allow/deny", testCacheHitAndDeny],
+    ["AI preference single-check fallbacks and custom categories", testCheckPreferenceFetchFallbacksAndCustomCategories],
+    ["AI preference batch cache path", testBatchUsesCachedEntriesAndDeduplicatesResults],
+    [
+      "negative cache: a throwing PDS is looked up once per TTL, verdict stays allowed",
+      testNegativeCacheFailedLookupFetchedOnce,
+    ],
+    ["negative cache: a missing record is looked up once", testNegativeCacheNoRecordFetchedOnce],
+    [
+      "cache cap: the least recently used entry is evicted at MAX_PREF_CACHE_ENTRIES",
+      testCacheEvictsLeastRecentlyUsedAtCap,
+    ],
+    [
+      "clearPreferenceCache resets positive and negative entries",
+      testClearPreferenceCacheResetsPositiveAndNegative,
+    ],
+    ["cache TTL: expired entries refetch, then recache", testCacheExpiryRefetchesAfterTtl],
 
-    // (4) filterPostsByAiPreferences core logic
+    // (4) single-pass records API — record + deniedCategories, no second fetch
+    [
+      "batchCheckAiPreferenceRecords returns the record and deniedCategories in one pass",
+      testBatchRecordsReturnsRecordWithoutSecondFetch,
+    ],
+    [
+      "batchCheckAiPreferenceRecords honours custom categories without refetching",
+      testBatchRecordsCustomCategories,
+    ],
+
+    // (5) filterPostsByAiPreferences core logic
     ["filterPostsByAiPreferences — keep all allowed", testFilterKeepAll],
     ["filterPostsByAiPreferences — remove denied", testFilterRemoveDenied],
     ["filterPostsByAiPreferences — all denied", testFilterAllDenied],
     ["filterPostsByAiPreferences — empty input", testFilterEmptyInput],
 
-    // (5) getDidsFromThread extraction
+    // (6) getDidsFromThread extraction
     ["getDidsFromThread — simple thread", testGetDidsSimple],
     ["getDidsFromThread — with parent chain", testGetDidsWithParent],
     ["getDidsFromThread — with nested replies", testGetDidsWithReplies],
     ["getDidsFromThread — null input", testGetDidsNullInput],
 
-    // (6) filterThreadByAiPreferences filtering
+    // (7) filterThreadByAiPreferences filtering
     ["filterThreadByAiPreferences — keep all", testFilterThreadKeepAll],
     [
       "filterThreadByAiPreferences — remove denied reply",
@@ -717,7 +1049,7 @@ async function main() {
     ],
     ["filterThreadByAiPreferences — undefined allowed (cache miss)", testFilterThreadUndefinedAllowed],
 
-    // (7) Integration: all 7 content tools enforce AI preferences
+    // (8) Integration: all 7 content tools enforce AI preferences
     [
       "integration: get-timeline-posts enforces prefs",
       testIntegrationTimelineEnforcesPrefs,
@@ -742,7 +1074,7 @@ async function main() {
       testIntegrationGetNotificationsEnforcesPrefs,
     ],
 
-    // (8) Edge cases
+    // (9) Edge cases
     ["edge: malformed post with no author kept", testFilterMalformedPostNoAuthor],
     ["edge: malformed post with no did allowed", testFilterMalformedPostNoAuthorDid],
     ["edge: empty array input", testFilterEmptyArray],
@@ -753,6 +1085,14 @@ async function main() {
     [
       "edge: filterThreadByAiPreferences handles malformed threads",
       testFilterThreadMalformed,
+    ],
+    [
+      "edge: malformed preference records allow instead of throwing",
+      testMalformedRecordsAllowWithoutThrowing,
+    ],
+    [
+      "edge: a record with no categories set still allows",
+      testRecordWithNoCategoriesSetAllows,
     ],
   ];
 

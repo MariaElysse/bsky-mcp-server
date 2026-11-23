@@ -27,6 +27,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Agent } from "@atproto/api";
 import { registerTools, AgentProvider } from "../src/tools.js";
+import { clearPreferenceCache } from "../src/ai-preferences.js";
 import { MentionStore, getMentionStore } from "../src/mention-store.js";
 import {
   extractAllParticipants,
@@ -58,6 +59,12 @@ async function cleanup() {
 }
 
 async function harness(provider: AgentProvider) {
+  // AI-preference verdicts (including "this author has no record") are cached
+  // process-wide for 5 minutes, so each harness starts from an empty cache:
+  // otherwise a DID mocked as allowing in one case would be reused as allowing
+  // in the next, whatever this case's fake agent says.
+  clearPreferenceCache();
+
   const server = new McpServer({ name: "test", version: "0.0.0" });
   registerTools(server, provider);
 

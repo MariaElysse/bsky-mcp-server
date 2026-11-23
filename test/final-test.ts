@@ -39,6 +39,7 @@ async function main() {
     ["create-reply", "node build/test/create-reply.test.js"],
     ["custom-endpoint", "node build/test/custom-endpoint/test-custom-endpoint.js"],
     ["pagination", "node build/test/pagination.test.js"],
+    ["atproto-fetch", "node build/test/atproto-fetch.test.js"],
   ];
 
   const results = [];

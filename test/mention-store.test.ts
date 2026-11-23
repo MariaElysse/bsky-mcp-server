@@ -15,16 +15,26 @@ import { runTests } from "./test-helpers.js";
  *  - getPending (retrieves pending entries sorted oldest first)
  *  - cleanup (removes entries older than maxAgeMs, default 24h)
  *  - size, getAll, clear, getPath helper methods
- *  - Concurrent access & locking
+ *  - Concurrent access & locking (owner tokens, dead-pid and mtime staleness,
+ *    safe take-over, and refusing to steal a live holder's lock)
+ *  - Retention (per-status windows, overrides, lazy hourly pass from the write
+ *    path, and the duplicate-reply guard that keeps `replied` longest)
  *  - Environment variable MENTION_STORE_PATH override
- *  - Singleton getMentionStore() behavior
+ *  - Singleton getMentionStore() behavior, including its retention-on-creation pass
  */
 
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { MentionStore, getMentionStore } from "../src/mention-store.js";
+import {
+  MentionStore,
+  getMentionStore,
+  resetMentionStoreSingleton,
+  LOCK_STALE_MS,
+  DEFAULT_RETENTION,
+  type RetentionPolicy,
+} from "../src/mention-store.js";
 
 const TEST_DIR = path.join(os.tmpdir(), "bsky-mcp-mention-store-test-" + Date.now() + "-" + Math.random().toString(36).slice(2));
 
@@ -294,9 +304,25 @@ async function testEnvVarStorePath() {
 }
 
 async function testSingletonInstance() {
-  const s1 = getMentionStore();
-  const s2 = getMentionStore();
-  assert.strictEqual(s1, s2, "getMentionStore() should return the same singleton instance");
+  const storePath = getTempStorePath("singleton");
+  const oldEnv = process.env.MENTION_STORE_PATH;
+  try {
+    // Pin the singleton's path: creating it now starts a retention pass over
+    // that file, so the suite must never let it point at a real store.
+    process.env.MENTION_STORE_PATH = storePath;
+    resetMentionStoreSingleton();
+    const s1 = getMentionStore();
+    const s2 = getMentionStore();
+    assert.strictEqual(s1, s2, "getMentionStore() should return the same singleton instance");
+    assert.equal(s1.getPath(), path.resolve(storePath));
+  } finally {
+    resetMentionStoreSingleton();
+    if (oldEnv !== undefined) {
+      process.env.MENTION_STORE_PATH = oldEnv;
+    } else {
+      delete process.env.MENTION_STORE_PATH;
+    }
+  }
 }
 
 async function testUpdateExistingEntryStatus() {
@@ -818,6 +844,505 @@ async function testConcurrentSkippedWrites() {
 // Runner
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Locking & retention helpers
+//
+// These suites run in a single process and cannot fork a stand-in "other
+// process", so a foreign lock holder is simulated with a lock file: a pid that
+// provably does not exist stands for a crashed holder, and this process's own
+// pid stands for a live one.
+// ---------------------------------------------------------------------------
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The store's lock retry budget (MAX_WRITE_ATTEMPTS × WRITE_RETRY_MS) is not
+ * exported, and it is the number a *stale* lock must beat, so it is restated
+ * here: taking over a provably dead holder must not cost the whole budget.
+ */
+const MAX_WRITE_ATTEMPTS_MS = 50 * 20;
+
+function lockPathFor(storePath: string): string {
+  return storePath + ".lock";
+}
+
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await fs.access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A pid that is demonstrably not running on this host. */
+function findDeadPid(): number {
+  for (let pid = 99998; pid > 1000; pid--) {
+    if (pid === process.pid) continue;
+    try {
+      process.kill(pid, 0);
+    } catch (err: unknown) {
+      if ((err as { code?: string }).code === "ESRCH") return pid;
+    }
+  }
+  throw new Error("could not find a provably dead pid on this host");
+}
+
+type SeedEntry = { uri: string; status: string; ageMs: number; error?: string; reason?: string };
+
+/** Write the store file directly so entries can be seeded at arbitrary ages. */
+async function seedStore(storePath: string, entries: SeedEntry[]): Promise<void> {
+  const now = Date.now();
+  const body = {
+    version: 1,
+    entries: entries.map((e) => ({
+      id: e.uri,
+      uri: e.uri,
+      status: e.status,
+      timestamp: now - e.ageMs,
+      ...(e.error !== undefined ? { error: e.error } : {}),
+      ...(e.reason !== undefined ? { reason: e.reason } : {}),
+    })),
+  };
+  await fs.writeFile(storePath, JSON.stringify(body, null, 2), "utf-8");
+}
+
+/** Install a lock file as though another process had taken it. */
+async function writeForeignLock(storePath: string, token: string): Promise<void> {
+  await fs.writeFile(lockPathFor(storePath), token, "utf-8");
+}
+
+function urisOf(entries: Array<{ uri: string }>): string[] {
+  return entries.map((e) => e.uri).sort();
+}
+
+/**
+ * Capture the `[mention-store]` stderr notes a test triggers, so it can wait
+ * for one. A never-appearing note rejects rather than hanging the suite.
+ */
+function captureStoreNotes(): {
+  lines: string[];
+  once: (fragment: string) => Promise<string>;
+  restore: () => void;
+} {
+  const lines: string[] = [];
+  const waiting: Array<{ fragment: string; resolve: (line: string) => void }> = [];
+  const original = console.error;
+  console.error = (...args: unknown[]): void => {
+    const line = args.map((a) => (typeof a === "string" ? a : String(a))).join(" ");
+    lines.push(line);
+    for (let i = waiting.length - 1; i >= 0; i--) {
+      if (line.includes(waiting[i].fragment)) {
+        const waiter = waiting[i];
+        waiting.splice(i, 1);
+        waiter.resolve(line);
+      }
+    }
+  };
+  return {
+    lines,
+    restore: () => {
+      console.error = original;
+    },
+    once: (fragment: string) =>
+      new Promise<string>((resolve, reject) => {
+        const seen = lines.find((l) => l.includes(fragment));
+        if (seen) {
+          resolve(seen);
+          return;
+        }
+        waiting.push({ fragment, resolve });
+        const timer = setTimeout(() => {
+          reject(new Error(`no [mention-store] note containing "${fragment}"; saw: ${lines.join(" | ") || "nothing"}`));
+        }, 20000);
+        timer.unref();
+      }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Cross-process locking: staleness detection and safe take-over
+// ---------------------------------------------------------------------------
+
+/**
+ * A lock left by a holder whose pid no longer exists must be taken over almost
+ * immediately — the old code spent the whole retry budget and then silently
+ * overwrote whatever lock was there.
+ */
+async function testStaleLockDeadPidIsTakenOverQuickly() {
+  const storePath = getTempStorePath("lock-dead-pid");
+  const lockPath = lockPathFor(storePath);
+  const store = new MentionStore(storePath);
+  const uri = "at://did:plc:alice/app.bsky.feed.post/lock-dead-pid";
+
+  await writeForeignLock(storePath, `${findDeadPid()}:crashedholder01`);
+
+  const started = Date.now();
+  const notes = captureStoreNotes();
+  let elapsedMs = 0;
+  try {
+    await store.markInProgress(uri);
+    elapsedMs = Date.now() - started;
+    assert.ok(
+      notes.lines.some((l) => l.includes("no longer exists on this host")),
+      `the take-over should be justified by the dead holder pid, saw: ${notes.lines.join(" | ") || "nothing"}`
+    );
+  } finally {
+    notes.restore();
+  }
+
+  assert.ok(
+    elapsedMs < MAX_WRITE_ATTEMPTS_MS,
+    `dead-pid lock was taken over in ${elapsedMs}ms; a provably dead holder must not cost the full ${MAX_WRITE_ATTEMPTS_MS}ms retry budget`
+  );
+  assert.equal(await store.size(), 1, "the write that took the abandoned lock over completed");
+  assert.equal(await pathExists(lockPath), false, "the taken-over lock was released normally afterwards");
+}
+
+/**
+ * A holder that is still alive but has not touched its lock file since well
+ * past LOCK_STALE_MS is wedged or leaking, so the lock can be taken.
+ */
+async function testStaleLockOldMtimeIsTakenOver() {
+  const storePath = getTempStorePath("lock-old-mtime");
+  const lockPath = lockPathFor(storePath);
+  const store = new MentionStore(storePath);
+  const uri = "at://did:plc:alice/app.bsky.feed.post/lock-old-mtime";
+
+  await writeForeignLock(storePath, `${process.pid}:wedgedholder02`);
+  // fs.utimes takes epoch **seconds**: age the lock file 90 s, i.e. past
+  // LOCK_STALE_MS, while leaving its holder alive.
+  const staleAtSec = (Date.now() - LOCK_STALE_MS - 60_000) / 1000;
+  await fs.utimes(lockPath, staleAtSec, staleAtSec);
+
+  const notes = captureStoreNotes();
+  try {
+    await store.markCompleted(uri, "at://did:plc:bot/app.bsky.feed.post/reply-old-mtime");
+    assert.ok(
+      notes.lines.some((l) => /lock file is \d+s old, at least LOCK_STALE_MS/.test(l)),
+      `the take-over should be justified by the lock's age, saw: ${notes.lines.join(" | ") || "nothing"}`
+    );
+  } finally {
+    notes.restore();
+  }
+
+  assert.equal(await store.isHandled(uri), true, "the stale lock was taken over and the write landed");
+  assert.equal(await pathExists(lockPath), false, "the taken-over lock was released normally afterwards");
+}
+
+/**
+ * A live holder with a freshly touched lock file keeps it: failing loudly is
+ * correct, because stealing that lock would lose the other writer's updates.
+ */
+async function testLiveFreshLockIsNeverStolen() {
+  const storePath = getTempStorePath("lock-not-stolen");
+  const lockPath = lockPathFor(storePath);
+  const store = new MentionStore(storePath);
+  const uri = "at://did:plc:alice/app.bsky.feed.post/lock-held-elsewhere";
+  const foreignToken = `${process.pid}:liveholder03`; // our own pid is guaranteed live
+
+  await writeForeignLock(storePath, foreignToken);
+
+  const notes = captureStoreNotes();
+  try {
+    await assert.rejects(
+      () => store.markInProgress(uri),
+      /lock was not taken over/,
+      "a live, fresh holder must not have its lock stolen"
+    );
+    // The lazy write-path prune hit the same wall first and swallowed it.
+    assert.ok(
+      notes.lines.some((l) => l.includes("retention pass skipped")),
+      `the write-path retention pass must fail safely here, saw: ${notes.lines.join(" | ") || "nothing"}`
+    );
+  } finally {
+    notes.restore();
+  }
+
+  assert.equal((await fs.readFile(lockPath, "utf-8")).trim(), foreignToken, "the failed acquirer left the foreign lock alone");
+  assert.equal(await pathExists(storePath), false, "the store was not written while the lock was held");
+
+  // Both the prune and the write must have handed the in-process queue back,
+  // otherwise every later write in this process would block forever.
+  await fs.unlink(lockPath);
+  await store.markInProgress(uri);
+  assert.equal(await store.size(), 1, "writes resume once the foreign lock is gone");
+}
+
+/**
+ * If another writer takes the lock file over mid-write, our release must leave
+ * that lock alone rather than unlinking it and letting a third writer in.
+ */
+async function testReleaseLockLeavesRetakenLockAlone() {
+  const storePath = getTempStorePath("lock-retaken");
+  const lockPath = lockPathFor(storePath);
+  const uri = "at://did:plc:alice/app.bsky.feed.post/lock-retaken";
+
+  // A deliberately large store stretches the read → stringify → rename window so
+  // another writer can retake the lock file mid-write.
+  const filler = Array.from({ length: 20000 }, (_, i) => ({
+    id: `at://did:plc:filler/app.bsky.feed.post/${i}`,
+    uri: `at://did:plc:filler/app.bsky.feed.post/${i}`,
+    status: "replied",
+    timestamp: Date.now() - 60000, // recent, so retention keeps them
+  }));
+  await fs.writeFile(storePath, JSON.stringify({ version: 1, entries: filler }, null, 2), "utf-8");
+
+  const store = new MentionStore(storePath);
+  // Warm-up write: claims the hourly retention slot, so the measured write below
+  // is the only thing touching the lock file.
+  await store.markCompleted("at://did:plc:filler/app.bsky.feed.post/warmup", "at://did:plc:bot/app.bsky.feed.post/r-warmup");
+
+  let writeFailure: unknown;
+  const write = store.markInProgress(uri).catch((err: unknown) => {
+    writeFailure = err;
+  });
+
+  let ourToken = "";
+  for (let attempt = 0; attempt < 1000 && !ourToken; attempt++) {
+    ourToken = (await fs.readFile(lockPath, "utf-8").catch(() => "")).trim();
+    if (!ourToken) await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  assert.ok(ourToken, "the write never observed our own lock file — the window was too short to test");
+  assert.ok(ourToken.startsWith(`${process.pid}:`), `expected our lock token to record our pid, saw "${ourToken}"`);
+  const suffix = ourToken.split(":").slice(1).join(":");
+  assert.ok(suffix.length >= 8, `lock token "${ourToken}" carries no unique suffix beyond the pid`);
+
+  const stealerToken = `${process.pid}:stealer04`;
+  await fs.writeFile(lockPath, stealerToken, "utf-8");
+
+  await write;
+  assert.equal(writeFailure, undefined, `the interrupted write should still succeed: ${writeFailure}`);
+  assert.equal(
+    (await fs.readFile(lockPath, "utf-8").catch(() => "<gone>")).trim(),
+    stealerToken,
+    "our release must not unlink a lock another writer took over"
+  );
+  assert.ok((await store.getAll()).some((e) => e.uri === uri), "the mention write itself still landed atomically");
+  assert.equal((await fs.readdir(path.dirname(storePath))).some((name) => name.includes(".tmp.")), false, "no temp file left behind");
+}
+
+/** Every write goes through a temp file plus an async rename: no leftovers, valid JSON. */
+async function testAtomicRenameLeavesNoTempFile() {
+  const storePath = getTempStorePath("rename-atomic");
+  const base = path.basename(storePath);
+  const store = new MentionStore(storePath);
+
+  for (let i = 0; i < 6; i++) {
+    await store.markCompleted(`at://did:plc:alice/app.bsky.feed.post/rename-${i}`, `at://did:plc:bot/app.bsky.feed.post/r-${i}`);
+  }
+  await store.markSkipped("at://did:plc:alice/app.bsky.feed.post/rename-skipped", "author denied AI inference");
+  await store.markFailed("at://did:plc:alice/app.bsky.feed.post/rename-failed", "boom");
+  await store.pruneByRetention();
+
+  const leftovers = (await fs.readdir(path.dirname(storePath))).filter(
+    (name) => name.startsWith(base + ".tmp.")
+  );
+  assert.deepEqual(leftovers, [], "no .tmp.<pid> file survives the atomic rename");
+
+  const parsed = JSON.parse(await fs.readFile(storePath, "utf-8"));
+  assert.equal(parsed.version, 1, "store file keeps its version field");
+  assert.equal(parsed.entries.length, 8, "all writes are visible in the renamed file");
+  assert.equal(await store.size(), 8);
+}
+
+// ---------------------------------------------------------------------------
+// Retention
+// ---------------------------------------------------------------------------
+
+/** Per-status windows: what ages out, and what must not. */
+async function testPruneByRetentionPerStatusWindows() {
+  assert.ok(DEFAULT_RETENTION.replied > DEFAULT_RETENTION.failed, "replied must outlive failed (duplicate-reply guard)");
+  assert.ok(DEFAULT_RETENTION.replied > DEFAULT_RETENTION.pending, "replied must outlive pending");
+  assert.ok(DEFAULT_RETENTION.replied > DEFAULT_RETENTION.skipped, "replied must outlive skipped");
+
+  const storePath = getTempStorePath("retention-windows");
+  const replied20d = "at://did:plc:u/app.bsky.feed.post/replied-20d";
+  const replied1d = "at://did:plc:u/app.bsky.feed.post/replied-1d";
+  const failed10d = "at://did:plc:u/app.bsky.feed.post/failed-10d";
+  const failed6d = "at://did:plc:u/app.bsky.feed.post/failed-6d";
+  const pending8d = "at://did:plc:u/app.bsky.feed.post/pending-8d";
+  const pendingExact7d = "at://did:plc:u/app.bsky.feed.post/pending-exactly-7d";
+  const pending2d = "at://did:plc:u/app.bsky.feed.post/pending-2d";
+  const skipped2d = "at://did:plc:u/app.bsky.feed.post/skipped-2d";
+  const skipped20h = "at://did:plc:u/app.bsky.feed.post/skipped-20h";
+
+  await seedStore(storePath, [
+    { uri: replied20d, status: "replied", ageMs: 20 * DAY_MS },
+    { uri: replied1d, status: "replied", ageMs: DAY_MS },
+    { uri: failed10d, status: "failed", ageMs: 10 * DAY_MS },
+    { uri: failed6d, status: "failed", ageMs: 6 * DAY_MS },
+    { uri: pending8d, status: "pending", ageMs: 8 * DAY_MS },
+    { uri: pendingExact7d, status: "pending", ageMs: 7 * DAY_MS },
+    { uri: pending2d, status: "pending", ageMs: 2 * DAY_MS },
+    { uri: skipped2d, status: "skipped", ageMs: 2 * DAY_MS },
+    { uri: skipped20h, status: "skipped", ageMs: 20 * 60 * 60 * 1000 },
+  ]);
+
+  const store = new MentionStore(storePath);
+  const removed = await store.pruneByRetention();
+  assert.equal(removed, 4, "10d failed + 8d pending + exactly-7d pending + 2d skipped aged out");
+  assert.deepEqual(urisOf(await store.getAll()), [
+    failed6d,
+    pending2d,
+    replied1d,
+    replied20d,
+    skipped20h,
+  ]);
+  assert.equal(await store.isHandled(replied20d), true, "a 20-day-old reply still blocks a duplicate reply");
+  assert.equal(await store.isHandled(failed10d), false, "an aged-out failed marker no longer suppresses the mention");
+}
+
+/**
+ * Regression guard for the reason retention replaced a blanket cleanup in the
+ * live process: pruning must never re-open a mention that was already answered,
+ * while the flat 24h cleanup default would have.
+ */
+async function testPruneKeepsRecentReplyAsDuplicateGuard() {
+  const storePath = getTempStorePath("retention-duplicate-guard");
+  const replied3d = "at://did:plc:u/app.bsky.feed.post/replied-3d";
+  const failed9d = "at://did:plc:u/app.bsky.feed.post/failed-9d";
+  const skipped3d = "at://did:plc:u/app.bsky.feed.post/skipped-3d";
+
+  await seedStore(storePath, [
+    { uri: replied3d, status: "replied", ageMs: 3 * DAY_MS },
+    { uri: failed9d, status: "failed", ageMs: 9 * DAY_MS },
+    { uri: skipped3d, status: "skipped", ageMs: 3 * DAY_MS, reason: "author denied AI inference" },
+  ]);
+
+  const store = new MentionStore(storePath);
+  assert.equal(await store.pruneByRetention(), 2, "only the aged failed and skipped markers go");
+  assert.equal(await store.isHandled(replied3d), true, "pruning must not re-open a mention we already answered");
+
+  // Contrast: what the old habit of calling cleanup() on a timer would have done.
+  assert.equal(await store.cleanup(), 1, "the flat 24h cleanup window would drop the 3-day-old reply");
+  assert.equal(await store.isHandled(replied3d), false, "…which is exactly the duplicate-reply hazard retention avoids");
+}
+
+/** Overrides, `Infinity` as "keep forever", and statuses we do not understand. */
+async function testPruneByRetentionOverridesAndUnknownStatus() {
+  const storePath = getTempStorePath("retention-overrides");
+  const failed10d = "at://did:plc:u/app.bsky.feed.post/failed-10d";
+  const skipped3d = "at://did:plc:u/app.bsky.feed.post/skipped-3d";
+  const unknown10d = "at://did:plc:u/app.bsky.feed.post/legacy-awaiting-review";
+
+  await seedStore(storePath, [
+    { uri: failed10d, status: "failed", ageMs: 10 * DAY_MS },
+    { uri: skipped3d, status: "skipped", ageMs: 3 * DAY_MS },
+    { uri: unknown10d, status: "awaiting-review", ageMs: 10 * DAY_MS },
+  ]);
+
+  const store = new MentionStore(storePath);
+
+  const kept: Partial<RetentionPolicy> = { failed: 30 * DAY_MS, skipped: Infinity };
+  assert.equal(await store.pruneByRetention(kept), 0, "widened windows keep failed and skipped; Infinity keeps them forever");
+  assert.deepEqual(urisOf(await store.getAll()), [failed10d, unknown10d, skipped3d]);
+
+  // Unknown statuses fall back to the longest window in the policy, never a
+  // shorter one, so a status we do not understand is never discarded early.
+  assert.equal(await store.pruneByRetention({ skipped: 0 }), 2, "skipped window 0 drops skips; legacy status survives");
+  assert.deepEqual(urisOf(await store.getAll()), [unknown10d]);
+
+  assert.equal(await store.pruneByRetention(), 0, "the legacy status survives the default windows too");
+  assert.deepEqual(urisOf(await store.getAll()), [unknown10d]);
+}
+
+/** The write path ages entries out on first use, then at most hourly per path. */
+async function testWritePathRunsRetentionOncePerHour() {
+  const storePath = getTempStorePath("retention-throttle");
+  const store = new MentionStore(storePath);
+  const agedFailed = "at://did:plc:u/app.bsky.feed.post/failed-10d";
+
+  await seedStore(storePath, [{ uri: agedFailed, status: "failed", ageMs: 10 * DAY_MS }]);
+
+  await store.markInProgress("at://did:plc:u/app.bsky.feed.post/first-write");
+  const afterFirst = urisOf(await store.getAll());
+  assert.ok(afterFirst.includes("at://did:plc:u/app.bsky.feed.post/first-write"));
+  assert.ok(!afterFirst.includes(agedFailed), "the first write through a store path runs a retention pass");
+
+  // Age the store again behind the store's back, then write again inside the hour.
+  const raw = JSON.parse(await fs.readFile(storePath, "utf-8"));
+  raw.entries.push({ id: agedFailed, uri: agedFailed, status: "failed", timestamp: Date.now() - 10 * DAY_MS });
+  await fs.writeFile(storePath, JSON.stringify(raw, null, 2), "utf-8");
+
+  await store.markCompleted("at://did:plc:u/app.bsky.feed.post/second-write", "at://did:plc:bot/app.bsky.feed.post/r2");
+  assert.ok(
+    urisOf(await store.getAll()).includes(agedFailed),
+    "a second retention pass must be throttled to once per hour per store path"
+  );
+}
+
+/** getMentionStore() — the stdio process's long-lived store — ages at creation. */
+async function testSingletonRunsRetentionOnCreation() {
+  const storePath = getTempStorePath("retention-singleton");
+  const agedFailed = "at://did:plc:u/app.bsky.feed.post/failed-12d";
+  const replied20d = "at://did:plc:u/app.bsky.feed.post/replied-20d";
+  const newMention = "at://did:plc:u/app.bsky.feed.post/new-mention";
+
+  await seedStore(storePath, [
+    { uri: agedFailed, status: "failed", ageMs: 12 * DAY_MS },
+    { uri: replied20d, status: "replied", ageMs: 20 * DAY_MS },
+  ]);
+
+  const oldEnv = process.env.MENTION_STORE_PATH;
+  try {
+    process.env.MENTION_STORE_PATH = storePath;
+    resetMentionStoreSingleton();
+    const store = getMentionStore();
+    assert.equal(store.getPath(), path.resolve(storePath));
+
+    // The creation pass is not awaited by getMentionStore(); the first write
+    // awaits it, so it is ordered ahead of traffic instead of racing it.
+    await store.markInProgress(newMention);
+
+    const uris = urisOf(await store.getAll());
+    assert.deepEqual(uris, [newMention, replied20d].sort());
+    assert.equal(await store.isHandled(replied20d), true, "the startup pass keeps the duplicate-reply guard");
+  } finally {
+    resetMentionStoreSingleton();
+    if (oldEnv !== undefined) {
+      process.env.MENTION_STORE_PATH = oldEnv;
+    } else {
+      delete process.env.MENTION_STORE_PATH;
+    }
+  }
+}
+
+/** A retention pass that cannot get the lock must never break a mention write. */
+async function testRetentionFailureNeverBreaksMentionWrite() {
+  const storePath = getTempStorePath("retention-failure");
+  const lockPath = lockPathFor(storePath);
+  const uri = "at://did:plc:u/app.bsky.feed.post/written-despite-prune-failure";
+
+  // Live, freshly touched lock held elsewhere: the lazy pass cannot get it.
+  await writeForeignLock(storePath, `${process.pid}:liveholder11`);
+
+  let writeFailure: unknown;
+  const notes = captureStoreNotes();
+  try {
+    const store = new MentionStore(storePath);
+    const write = store.markInProgress(uri).catch((err: unknown) => {
+      writeFailure = err;
+    });
+
+    const note = await notes.once("retention pass skipped");
+    assert.match(note, new RegExp(`retention pass skipped for ${storePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+
+    // The mention write is now waiting on that same lock; let it through.
+    await fs.unlink(lockPath);
+    await write;
+  } finally {
+    notes.restore();
+    await fs.rm(lockPath, { force: true });
+  }
+
+  assert.equal(writeFailure, undefined, "a failed retention pass must not reject the mention write");
+  assert.ok(
+    urisOf(await new MentionStore(storePath).getAll()).includes(uri),
+    "the mention write survived the failed retention pass"
+  );
+}
+
 const tests: Array<[string, () => Promise<void>]> = [
   ["testInitAndEmpty", testInitAndEmpty],
   ["testMarkInProgress", testMarkInProgress],
@@ -866,6 +1391,17 @@ const tests: Array<[string, () => Promise<void>]> = [
   ["testMixedStatusesIncludingSkipped", testMixedStatusesIncludingSkipped],
   ["testCleanupRemovesOldSkipped", testCleanupRemovesOldSkipped],
   ["testConcurrentSkippedWrites", testConcurrentSkippedWrites],
+  ["testStaleLockDeadPidIsTakenOverQuickly", testStaleLockDeadPidIsTakenOverQuickly],
+  ["testStaleLockOldMtimeIsTakenOver", testStaleLockOldMtimeIsTakenOver],
+  ["testLiveFreshLockIsNeverStolen", testLiveFreshLockIsNeverStolen],
+  ["testReleaseLockLeavesRetakenLockAlone", testReleaseLockLeavesRetakenLockAlone],
+  ["testAtomicRenameLeavesNoTempFile", testAtomicRenameLeavesNoTempFile],
+  ["testPruneByRetentionPerStatusWindows", testPruneByRetentionPerStatusWindows],
+  ["testPruneKeepsRecentReplyAsDuplicateGuard", testPruneKeepsRecentReplyAsDuplicateGuard],
+  ["testPruneByRetentionOverridesAndUnknownStatus", testPruneByRetentionOverridesAndUnknownStatus],
+  ["testWritePathRunsRetentionOncePerHour", testWritePathRunsRetentionOncePerHour],
+  ["testSingletonRunsRetentionOnCreation", testSingletonRunsRetentionOnCreation],
+  ["testRetentionFailureNeverBreaksMentionWrite", testRetentionFailureNeverBreaksMentionWrite],
 ];
 
 async function main() {
