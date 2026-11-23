@@ -17,21 +17,15 @@ src/
   tools.ts              # Core tool implementations (get-timeline-posts, search-posts, create-post, etc.) — ~2400 lines
   ai-preferences.ts     # AI preference reading/caching (community.lexicon.preference.ai records), batch checking, tombstone filtering
   link-preview.ts       # Link preview metadata fetching & thumbnail upload via cardyb
-  llm-preprocessor.ts   # POST_FORMAT_SPEC post/thread formatting for LLM consumption (Markdown, XML attributes)
+  llm-preprocessor.ts   # Post/thread formatting per docs/post-format-spec.md (Markdown, XML attributes)
   mention-store.ts      # Persistent mention deduplication store (JSON file with atomic writes)
   thread-context.ts     # Thread context retrieval and formatting for mention context tool
   prompts.ts            # Prompt templates (mention reply generation)
   resources.ts          # MCP resource definitions
   utils.ts              # Shared utilities (cleanHandle, validateUri, response formatters, XML escaping)
-  remote/               # Remote HTTP + OAuth mode
-    index.ts            # Remote server entry point
-    oauth-bluesky.ts    # Bluesky OAuth flow
-    oauth-mcp.ts        # MCP OAuth flow
-    server.ts           # HTTP server implementation
-    storage.ts          # Session/token persistence
   scripts/              # Development/utility scripts
 test/                   # Test suites (plain Node.js ESM scripts, not Jest/Mocha)
-deploy/                 # Deployment artifacts (systemd, Caddyfile)
+docs/                   # Project documentation (post-format-spec.md)
 .github/workflows/      # CI pipeline (GitHub Actions)
 ```
 
@@ -45,11 +39,12 @@ deploy/                 # Deployment artifacts (systemd, Caddyfile)
 | `src/mention-store.ts` | Persistent mention deduplication store with JSON file backend, atomic writes, concurrency locking | ~340 |
 | `src/thread-context.ts` | Thread context retrieval and formatting for mention context tool, AI-preference filtering | ~380 |
 | `src/utils.ts` | Shared helpers: `cleanHandle()`, `validateUri()`, `mcpSuccessResponse()`, `mcpErrorResponse()`, `escapeXml()` | ~350 |
-| `src/llm-preprocessor.ts` | Formats raw Bluesky API responses into LLM-friendly text (POST_FORMAT_SPEC), facet-to-markdown, thread formatting | ~1480 |
+| `src/llm-preprocessor.ts` | Formats raw Bluesky API responses into LLM-friendly text (`docs/post-format-spec.md`), facet-to-markdown, thread formatting | ~1480 |
 | `src/link-preview.ts` | Fetches URL metadata via cardyb, uploads thumbnails to Bluesky | — |
 | `test/final-test.ts` | Orchestrator that runs all 12 test suites sequentially | ~70 |
 | `test/pagination.test.ts` | 23 tests covering auto-fetch, cursor mode, hours mode, edge cases | ~800 |
-| `tsconfig.json` | ES2020 target, nodenext modules, strict mode, excludes remote/ and some test files | — |
+| `docs/post-format-spec.md` | The XML post/thread format every content tool emits | ~265 |
+| `tsconfig.json` | ES2020 target, nodenext modules, strict mode. `"exclude": []` — everything under `src/`, `scripts/`, `test/` must compile | — |
 | `Dockerfile` | Build: install pnpm, install deps, compile TS (uses `node:lts-alpine`) | — |
 
 ## Tool Registration
@@ -62,27 +57,20 @@ Each tool takes a Zod schema for params and returns `mcpSuccessResponse()` or `m
 
 To add a new tool:
 - If it's a core Bluesky API tool, add it to `src/tools.ts` inside `registerTools()`
-- If it's a remote/OAuth-specific tool, add it in `src/index.ts` or the appropriate `remote/` file
+- If it's an account/config tool (AI preferences, resources), add it in `src/index.ts`
 - Always update README.md with the new tool description
 
 ## Environment Variables
 
-| Variable | Required | Mode | Description |
-|----------|----------|------|-------------|
-| `BLUESKY_IDENTIFIER` | Yes (stdio) | stdio | Bluesky handle or DID |
-| `BLUESKY_APP_PASSWORD` | Yes (stdio) | stdio | App password from Bluesky settings |
-| `BLUESKY_SERVICE_URL` | Yes | Both | AT Protocol service URL (e.g., `https://bsky.social`) |
-| `BLUESKY_WEB_URL` | No | Both | Web frontend base URL for link formatting (default: `https://bsky.app`) |
-| `MENTION_STORE_PATH` | No | Both | Custom path for mention deduplication JSON store |
-
-Remote mode variables:
+All variables are for the single stdio mode — the server listens on no port and reads no `PORT`/`HOST`/`PUBLIC_URL`/`DATA_DIR`.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `PUBLIC_URL` | Yes | Public-facing URL for OAuth redirects |
-| `DATA_DIR` | No | Persistent data directory (default: `/var/lib/bsky-mcp`) |
-| `PORT` | No | HTTP port (default: 8787) |
-| `HOST` | No | Host to bind (default: 127.0.0.1) |
+| `BLUESKY_IDENTIFIER` | Yes | Bluesky handle or DID |
+| `BLUESKY_APP_PASSWORD` | Yes | App password from Bluesky settings |
+| `BLUESKY_SERVICE_URL` | Yes | AT Protocol service URL (e.g., `https://bsky.social`) |
+| `BLUESKY_WEB_URL` | No | Web frontend base URL for link formatting (default: `https://bsky.app`) |
+| `MENTION_STORE_PATH` | No | Custom path for mention deduplication JSON store |
 
 ## Build & Test Commands
 
@@ -91,15 +79,22 @@ pnpm install              # Install dependencies
 pnpm run build            # Compile TypeScript + create build/test/ dir
 pnpm run start            # Run the stdio MCP server
 pnpm run dev              # Build and run in one step
-pnpm run test             # Full test suite (builds then runs all 12 test suites)
+pnpm run test             # Build, then run all 12 suites via test/final-test.ts
 
-# Individual test suites
-pnpm run test:registration # Tool registration test (8 tests)
-pnpm run test:remote      # Remote OAuth tests (7 tests)
-pnpm run test:get-thread  # Post-thread tool test
-pnpm run test:url-converter # URL converter test
-pnpm run test:link-preview   # Link preview test
+# Suites with their own package.json scripts:
+pnpm run test:get-thread    # build/test/tools/test-get-post-thread.js
+pnpm run test:url-converter # build/test/url-converter/test-url-converter.js
+
+# Any other suite runs straight from the compiled output, e.g.:
+node build/test/pagination.test.js
+node build/test/link-preview/test-link-preview.js
+
+# Example-data generators (rewrite test/*_examples_results.md):
+pnpm run process-posts
+pnpm run process-threads
 ```
+
+`test/tools/test-get-post-thread.ts` is the one suite the orchestrator does not run — it only runs through `pnpm run test:get-thread`.
 
 ## CI/CD
 
@@ -111,21 +106,23 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `main`:
 5. `pnpm run build`
 6. `pnpm run test`
 
+`pnpm install` already runs with `--frozen-lockfile` by default in CI (pnpm enables it whenever `CI` is set and a lockfile is present), so editing `package.json` without committing a matching `pnpm-lock.yaml` fails the build instead of silently re-resolving.
+
 ## Testing Conventions
 
 - Tests are plain Node.js ESM scripts in `test/` (not Jest/Mocha)
 - Each test file is self-contained and runs against the built output in `build/test/`
 - The orchestrator (`test/final-test.ts`) runs all test suites sequentially, printing per-suite pass/fail and a summary
 
-**12 test suites (171 tests total):**
+**12 test suites (214 tests total — `pnpm run test` prints the live counts):**
 
-1. `register-tools` — tool registration, error handling, agent resolution (8 tests)
+1. `register-tools` — tool registration, error handling, agent resolution (19 tests)
 2. `url-converter` — Bluesky URL to AT URI parsing (5 tests)
 3. `link-preview` — cardyb extraction, thumbnail upload, error cases (11 tests)
-4. `ai-preferences` — flatten/unflatten, batch check, filter, integration with tools (32 tests)
-5. `ai-preferences-tombstone` — tombstone replacement, thread filtering, XML format (14 tests)
+4. `ai-preferences` — flatten/unflatten, batch check, filter, integration with tools (35 tests)
+5. `ai-preferences-tombstone` — tombstone replacement, thread filtering, XML format (17 tests)
 6. `mention-store` — CRUD, atomic writes, concurrency, cleanup, persistence (32 tests)
-7. `thread-context` — thread fetching, participant extraction, formatting (18 tests)
+7. `thread-context` — thread fetching, participant extraction, formatting (20 tests)
 8. `mention-context` — mention tool, dedup, AI filtering (14 tests)
 9. `mention-monitor` — poll, auto-reply, dedup across runs (15 tests)
 10. `create-reply` — reply creation, URI validation, facets, dedup (14 tests)
@@ -152,7 +149,7 @@ When modifying content-fetching tools, ensure they respect AI preferences via `b
 ### Server Lifecycle
 1. **Bootstrap**: Create `McpServer` instance, register resources/prompts/tools
 2. **Auth**: `initializeBlueskyConnection()` creates `AtpAgent`, logs in via `BLUESKY_IDENTIFIER` + `BLUESKY_APP_PASSWORD`
-3. **Transport**: Connects via `StdioServerTransport` (stdio mode) or HTTP (remote OAuth mode)
+3. **Transport**: `StdioServerTransport` — stdio only, no port and no HTTP server
 4. **Tool handlers**: All tools resolve the agent lazily via `() => agent` provider pattern
 
 ### Pagination (Cursor-Based)
@@ -165,7 +162,7 @@ When modifying content-fetching tools, ensure they respect AI preferences via `b
 - Default count/limit: 20
 
 ### Response Formatting
-- `llm-preprocessor.ts` implements the POST_FORMAT_SPEC for LLM consumption
+- `llm-preprocessor.ts` implements the post/thread format specified in `docs/post-format-spec.md`
 - Converts Bluesky facets → Markdown links/mentions (uses `RichText` from `@atproto/api`)
 - Thread formatting with parent/child relationships, AI preference filtering with tombstones
 - Supports custom `BSKY_WEB_URL` for non-default Bluesky frontends
@@ -199,15 +196,11 @@ When modifying content-fetching tools, ensure they respect AI preferences via `b
 6. Add test runner entry in `test/final-test.ts` if it's a new suite
 7. Run `pnpm run test` — all 12 suites must pass
 
-## Remote OAuth Mode
+## Transport
 
-The server supports a secondary HTTP mode for scenarios where stdio isn't practical:
+stdio only. `src/index.ts` logs in with `BLUESKY_IDENTIFIER` + `BLUESKY_APP_PASSWORD` and connects a `StdioServerTransport`; one process serves one MCP session over stdin/stdout and binds no port.
 
-- **Startup**: `PUBLIC_URL=http://localhost:8787 node build/src/remote/index.js`
-- Handles Bluesky OAuth dance automatically (redirects to Bluesky auth, exchanges code for tokens)
-- Persists sessions/tokens in SQLite via `src/remote/storage.ts`
-- JWT-authenticated HTTP API exposing the same tools
-- Deployment artifacts in `deploy/` (systemd unit, Caddyfile)
+The upstream remote/OAuth mode is **not supported here**. `src/remote/`, `src/scripts/generate-signing-key.ts`, `test/remote-oauth.test.ts`, `Dockerfile.remote`, `.env.remote.example`, and `deploy/` were deleted: they were excluded from `tsconfig.json`, never compiled or run by CI, and their HTTP/OAuth dependencies (`express`, `better-sqlite3`, `@atproto/oauth-client-node`, `jose`) were never added to `package.json`, so they could not have started. Don't reintroduce an HTTP/OAuth transport unless the task also adds the dependencies, a compile target, tests, and CI coverage.
 
 ## Docker
 

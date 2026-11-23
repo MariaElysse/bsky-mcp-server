@@ -86,6 +86,10 @@ get-timeline-posts: { count: 20, type: "posts", cursor: "abc123..." }
 - **Time-based mode (`type: "hours"`):** Does not support cursor — always starts fresh from the current time window.
 - **Default `count`:** Most tools default to `count: 20` to keep responses concise. Increase it when you need more results in one call.
 
+## Post & Thread Format
+
+Post- and thread-fetching tools return text formatted for LLM consumption: structured `<posts>` / `<post>` / `<replies>` elements carrying attributes (`uri`, `bsky_url`, `author_handle`, `author_name`, `posted_at`, …), embedded links/images/video, quoted posts, and engagement counts. Reposts are wrapped in `<repost>`. The format is specified in [docs/post-format-spec.md](docs/post-format-spec.md); posts hidden by AI preferences are additionally replaced with tombstone placeholders so feed and thread order stays intact.
+
 ## Installation
 
 ### Installing Manually
@@ -135,22 +139,9 @@ Follow the steps to set up MCP with your client of choice. For example, to set u
 
 For more details about running MCP servers in Claude for desktop, see https://modelcontextprotocol.io/quickstart/user
 
-## Remote OAuth Mode (Optional)
+## Transport
 
-This server also supports a remote HTTP mode with OAuth authentication. Instead of using app passwords over stdio, the server runs as an HTTP service that handles Bluesky's OAuth flow:
-
-```bash
-# Start the remote OAuth server
-PUBLIC_URL=http://localhost:8787 node build/src/remote/index.js
-```
-
-Environment variables for remote mode:
-- `PUBLIC_URL`: Public-facing URL of this server (required)
-- `DATA_DIR`: Directory for persistent data (default: `/var/lib/bsky-mcp`)
-- `SIGNING_KEY_PATH`: Path to OAuth signing keys (default: `$DATA_DIR/signing-keys.json`)
-- `DB_PATH`: Path to the SQLite database (default: `$DATA_DIR/data.db`)
-- `PORT`: Port to listen on (default: 8787)
-- `HOST`: Host to bind (default: 127.0.0.1)
+This server speaks MCP over **stdio only**. Your MCP client launches it as a subprocess (`node build/src/index.js`) and authenticates to Bluesky with the app password from the environment variables above — there is no HTTP/OAuth server mode to deploy. An earlier remote/OAuth HTTP experiment lived in `src/remote/`; it was never compiled by `pnpm run build`, never tested, and could not start from a clean install, so it has been removed rather than left half-maintained. See [Differences from upstream](#differences-from-upstream).
 
 ## Creating App Passwords
 
@@ -176,6 +167,20 @@ The following categories can be configured:
 - This server stores your session information in memory only and does not share it with the MCP client.
 - The MCP client only has access to the tools, not to your authentication or app password.
 - AI preferences are cached locally per DID with a 5-minute TTL.
+
+## Differences from upstream
+
+This repository is a fork of [lizthegrey/bsky-mcp-server](https://github.com/lizthegrey/bsky-mcp-server) and has moved well ahead of it. What to expect if you're comparing against upstream:
+
+- **AI preference enforcement** — `community.lexicon.preference.ai` records are read and cached per DID, and enforced by every content-fetching tool; denied posts are replaced with tombstones so feed and thread order is preserved. `get-ai-preferences` / `set-ai-preference` manage the record.
+- **Mention handling** — `get-mention-context`, `run-mention-monitor`, `create-reply`, and a persistent JSON mention store that deduplicates replies across runs.
+- **Thread context** — `src/thread-context.ts` fetches and formats mention conversations with parent/child structure and AI-preference filtering.
+- **Cursor-based pagination** on the post-fetching tools (auto-fetch, cursor, and hours modes, capped at 500 posts per call).
+- **Self-hosted PDS support** — `BLUESKY_SERVICE_URL` and `BSKY_WEB_URL` for alternate PDSes and Bluesky web frontends; search tools run against `api.bsky.app` through a separate unauthenticated agent so they keep working when your home PDS doesn't proxy search.
+- **No remote OAuth mode** — the upstream `src/remote/` HTTP + OAuth server, `src/scripts/generate-signing-key.ts`, `Dockerfile.remote`, `.env.remote.example`, the `deploy/` systemd/Caddy/Docker-Compose artifacts, and `test/remote-oauth.test.ts` have all been deleted. The server is stdio-only and binds no port.
+- **CI** — GitHub Actions runs install → build → the full test suite on every push and PR to `main`.
+
+Install and deploy from this repository's `main` (or your own fork of it), not from an upstream branch.
 
 ## License
 

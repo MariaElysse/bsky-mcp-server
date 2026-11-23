@@ -85,9 +85,10 @@ async function testNullAgentReturnsError() {
 }
 
 async function testAgentIsResolvedPerCall() {
-  // Invariant that matters for the remote/OAuth path: registerTools must
-  // evaluate getAgent on every invocation, not cache whatever it saw at
-  // registration time. A per-session transport depends on this.
+  // Invariant that matters for the stdio path: registerTools must evaluate
+  // getAgent on every invocation, not cache whatever it saw at registration
+  // time. Registration happens before login, so this is the only way a tool
+  // call ever sees a non-null agent.
   let callCount = 0;
   const fakeAgent = {
     did: "did:plc:alice",

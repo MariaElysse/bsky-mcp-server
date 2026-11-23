@@ -1,4 +1,4 @@
-// Implements the spec described in /POST_FORMAT_SPEC.md
+// Implements the spec described in docs/post-format-spec.md
 import { formatISO9075 } from 'date-fns';
 import type {
   AppBskyFeedDefs,

@@ -88,7 +88,8 @@ function defaultSearchAgentProvider(): Agent | null {
  * Register all Bluesky MCP tools on the provided server.
  * `getAgent` returns the currently authenticated AtpAgent for this session,
  * or null if the caller is not authenticated. It is evaluated per tool call
- * so OAuth-backed sessions can rotate credentials between invocations.
+ * because tools are registered before login completes, and a re-login swaps
+ * the agent without re-registering anything.
  * `getSearchAgent` supplies the agent for search-posts and search-people;
  * see defaultSearchAgentProvider for why searches bypass `getAgent`.
  */
@@ -599,7 +600,7 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
           return mcpSuccessResponse("No thread data available.");
         }
 
-        // Process the thread structure and format it according to POST_FORMAT_SPEC
+        // Process the thread structure and format it according to docs/post-format-spec.md
         const threadData = formatPostThread(filteredThread);
 
         return mcpSuccessResponse(threadData);
