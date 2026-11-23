@@ -12,6 +12,9 @@ import { runTests } from "./test-helpers.js";
  *  (6) get-notifications: auto-fetch, cursor mode, empty cursor
  *  (7) Default values: count/limit defaults to 20 when omitted
  *  (8) Cursor signal in response text when more results available
+ *  (9) Cursor regression: a page that exactly fills `count`/`limit` must still
+ *      advertise the API cursor (auto-fetch must not silently truncate the feed),
+ *      and hours-mode must never advertise a cursor it ignores.
  */
 
 import assert from "node:assert/strict";
@@ -138,10 +141,11 @@ function createSmartAgent(config: {
 // ---------------------------------------------------------------------------
 
 async function testTimelineAutoFetchPaginatesInternally() {
+  // Auto-fetch walks pages until it has `count` posts or the API stops cursoring.
   const agent = createSmartAgent({
     timelinePages: [
-      { feed: [post(1), post(2), post(3), post(4), post(5)], cursor: "cursor-1" },
-      { feed: [post(6), post(7), post(8), post(9), post(10)], cursor: undefined },
+      { feed: [post(1), post(2)], cursor: "cursor-1" },
+      { feed: [post(3), post(4)], cursor: undefined },
     ],
   });
 
@@ -154,7 +158,77 @@ async function testTimelineAutoFetchPaginatesInternally() {
     assert.equal(result.isError, undefined);
     const text = getText(result);
     assert.ok(text.includes("Retrieved"), "should include retrieval summary");
+    assert.ok(text.includes("post 1") && text.includes("post 4"), "should keep walking pages until the API runs dry");
     assert.ok(!hasCursorSignal(text), "should not signal more when API has no more pages");
+  } finally {
+    await close();
+  }
+}
+
+async function testTimelineAutoFetchSignalsCursorWhenPageIsFull() {
+  // Regression: a single page that exactly fills `count` used to hide the API's cursor,
+  // so callers silently lost everything past the first page of the timeline.
+  const agent = createSmartAgent({
+    timelinePages: [
+      { feed: [post(1), post(2), post(3), post(4), post(5)], cursor: "timeline-page-2" },
+      { feed: [post(6), post(7)], cursor: undefined },
+    ],
+  });
+
+  const { client, close } = await harness(() => agent);
+  try {
+    const first: any = await client.callTool({
+      name: "get-timeline-posts",
+      arguments: { count: 5, type: "posts" },
+    });
+    assert.equal(first.isError, undefined);
+    const firstText = getText(first);
+    assert.ok(firstText.includes("post 5"), "first page should be returned in full");
+    assert.ok(hasCursorSignal(firstText), "a full page with an API cursor must advertise the cursor");
+    const cursor = extractCursor(firstText);
+    assert.equal(cursor, "timeline-page-2", "cursor signal should match API cursor");
+
+    const second: any = await client.callTool({
+      name: "get-timeline-posts",
+      arguments: { count: 5, type: "posts", cursor: cursor! },
+    });
+    assert.equal(second.isError, undefined);
+    const secondText = getText(second);
+    assert.ok(secondText.includes("post 6") && secondText.includes("post 7"), "cursor must resume exactly where page 1 ended");
+    assert.ok(!hasCursorSignal(secondText), "no cursor signal once the API is exhausted");
+  } finally {
+    await close();
+  }
+}
+
+async function testTimelineHoursModeSuppressesCursorSignal() {
+  // type="hours" ignores cursors (the window is relative to now), so an API cursor
+  // reached inside that mode must not be advertised as if it were usable.
+  const oldPost = {
+    post: {
+      uri: "at://did:plc:old/app.bsky.feed.post/old1",
+      author: { did: "did:plc:old", handle: "old.test", displayName: "Old" },
+      record: { text: "ancient post", createdAt: "2020-01-01T00:00:00.000Z" },
+    },
+  };
+  const agent = createSmartAgent({
+    timelinePages: [
+      { feed: [post(1), post(2), post(3)], cursor: "hours-cursor" },
+      { feed: [oldPost], cursor: "hours-cursor-2" },
+    ],
+  });
+
+  const { client, close } = await harness(() => agent);
+  try {
+    const result: any = await client.callTool({
+      name: "get-timeline-posts",
+      arguments: { count: 24, type: "hours" },
+    });
+    assert.equal(result.isError, undefined);
+    const text = getText(result);
+    assert.ok(text.includes("post 1"), "hours mode should return posts inside the window");
+    assert.ok(!text.includes("ancient post"), "posts outside the window should be dropped");
+    assert.ok(!hasCursorSignal(text), "hours mode must not advertise an unusable cursor");
   } finally {
     await close();
   }
@@ -247,6 +321,8 @@ async function testFeedAutoFetchPaginatesInternally() {
     assert.equal(result.isError, undefined);
     const text = getText(result);
     assert.ok(text.includes("Retrieved"), "should include retrieval summary");
+    assert.ok(hasCursorSignal(text), "a full page with an API cursor must advertise the cursor");
+    assert.equal(extractCursor(text), "feed-cursor-1", "cursor signal should match API cursor");
   } finally {
     await close();
   }
@@ -317,6 +393,8 @@ async function testListAutoFetchPaginatesInternally() {
     assert.equal(result.isError, undefined);
     const text = getText(result);
     assert.ok(text.includes("Retrieved"), "should include retrieval summary");
+    assert.ok(hasCursorSignal(text), "a full page with an API cursor must advertise the cursor");
+    assert.equal(extractCursor(text), "list-cursor-1", "cursor signal should match API cursor");
   } finally {
     await close();
   }
@@ -365,6 +443,8 @@ async function testUserPostsAutoFetchPaginatesInternally() {
     assert.equal(result.isError, undefined);
     const text = getText(result);
     assert.ok(text.includes("Retrieved"), "should include retrieval summary");
+    assert.ok(hasCursorSignal(text), "a full page with an API cursor must advertise the cursor");
+    assert.equal(extractCursor(text), "user-cursor-1", "cursor signal should match API cursor");
   } finally {
     await close();
   }
@@ -435,6 +515,8 @@ async function testLikedPostsAutoFetchPaginatesInternally() {
     assert.equal(result.isError, undefined);
     const text = getText(result);
     assert.ok(text.includes("Retrieved"), "should include retrieval summary");
+    assert.ok(hasCursorSignal(text), "a full page with an API cursor must advertise the cursor");
+    assert.equal(extractCursor(text), "liked-cursor-1", "cursor signal should match API cursor");
   } finally {
     await close();
   }
@@ -505,6 +587,50 @@ async function testNotificationsAutoFetchPaginatesInternally() {
     assert.equal(result.isError, undefined);
     const text = getText(result);
     assert.ok(text.includes("Retrieved"), "should include retrieval summary");
+    assert.ok(text.includes("u1.test") && text.includes("u2.test"), "should keep walking pages until the API runs dry");
+    assert.ok(!hasCursorSignal(text), "should not signal more when API has no more pages");
+  } finally {
+    await close();
+  }
+}
+
+async function testNotificationsAutoFetchSignalsCursorWhenPageIsFull() {
+  // Regression: a single page that exactly fills `limit` used to hide the API's cursor.
+  const page = (n: number) => ({
+    author: { did: `did:plc:n${n}`, handle: `n${n}.test` },
+    reason: "like",
+    uri: `at://did:plc:n${n}/app.bsky.feed.post/${n}`,
+    indexedAt: new Date().toISOString(),
+    isRead: false,
+  });
+  const agent = createSmartAgent({
+    notifPages: [
+      { notifications: [page(1), page(2), page(3), page(4), page(5)], cursor: "notif-page-2" },
+      { notifications: [page(6)], cursor: undefined },
+    ],
+  });
+
+  const { client, close } = await harness(() => agent);
+  try {
+    const first: any = await client.callTool({
+      name: "get-notifications",
+      arguments: { limit: 5 },
+    });
+    assert.equal(first.isError, undefined);
+    const firstText = getText(first);
+    assert.ok(firstText.includes("n5.test"), "first page should be returned in full");
+    assert.ok(hasCursorSignal(firstText), "a full page with an API cursor must advertise the cursor");
+    const cursor = extractCursor(firstText);
+    assert.equal(cursor, "notif-page-2", "cursor signal should match API cursor");
+
+    const second: any = await client.callTool({
+      name: "get-notifications",
+      arguments: { limit: 5, cursor: cursor! },
+    });
+    assert.equal(second.isError, undefined);
+    const secondText = getText(second);
+    assert.ok(secondText.includes("n6.test"), "cursor must resume exactly where page 1 ended");
+    assert.ok(!hasCursorSignal(secondText), "no cursor signal once the API is exhausted");
   } finally {
     await close();
   }
@@ -739,6 +865,8 @@ async function main() {
   const cases: Array<[string, () => Promise<void>]> = [
     // (1) get-timeline-posts
     ["get-timeline-posts: auto-fetch paginates internally", testTimelineAutoFetchPaginatesInternally],
+    ["get-timeline-posts: auto-fetch signals cursor when page is full", testTimelineAutoFetchSignalsCursorWhenPageIsFull],
+    ["get-timeline-posts: hours mode suppresses cursor signal", testTimelineHoursModeSuppressesCursorSignal],
     ["get-timeline-posts: cursor mode fetches single page", testTimelineCursorModeFetchesSinglePage],
     ["get-timeline-posts: hours mode ignores cursor", testTimelineHoursModeIgnoresCursor],
     ["get-timeline-posts: cursor mode empty page", testTimelineCursorModeEmptyPage],
@@ -764,6 +892,7 @@ async function main() {
 
     // (6) get-notifications
     ["get-notifications: auto-fetch paginates internally", testNotificationsAutoFetchPaginatesInternally],
+    ["get-notifications: auto-fetch signals cursor when page is full", testNotificationsAutoFetchSignalsCursorWhenPageIsFull],
     ["get-notifications: cursor mode fetches single page", testNotificationsCursorModeFetchesSinglePage],
     ["get-notifications: cursor mode empty page", testNotificationsCursorModeEmptyPage],
 

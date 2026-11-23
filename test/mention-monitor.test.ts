@@ -538,13 +538,26 @@ async function testAiPreferenceFilteringDenied() {
     });
 
     assert.equal(res.isError, undefined);
-    assert.match(res.content[0].text, /1 mention\(s\) skipped \(already handled \/ AI preference denied\)/);
+    assert.match(res.content[0].text, /0 mention\(s\) skipped \(already handled\)/);
+    assert.match(res.content[0].text, /1 mention\(s\) skipped \(author AI preference opt-out/);
     assert.match(res.content[0].text, /0 mention\(s\) replied to automatically/);
     assert.equal(postCalled, false, "post should not be called for AI denied user");
 
-    // Store should mark it failed so it is considered handled
+    // An AI opt-out is a policy skip, not a failure: it must stay non-terminal so a
+    // later poll reconsiders the mention once the author's preference changes.
     const store = new MentionStore(storePath);
-    assert.equal(await store.isHandled(mentionUri), true);
+    assert.equal(await store.isHandled(mentionUri), false, "AI opt-out must not be recorded as handled");
+
+    const res2: any = await client.callTool({
+      name: "run-mention-monitor",
+      arguments: { poll: true, autoReply: true },
+    });
+    assert.equal(res2.isError, undefined);
+    assert.match(
+      res2.content[0].text,
+      /1 mention\(s\) skipped \(author AI preference opt-out/,
+      "a policy-skipped mention is re-visited on the next poll, not counted as already handled"
+    );
   } finally {
     await close();
   }

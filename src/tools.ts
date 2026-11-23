@@ -10,6 +10,7 @@ import {
   extractFirstUrl,
   mcpErrorResponse,
   mcpSuccessResponse,
+  parsePostUri,
 } from './utils.js';
 import { preprocessPosts, formatPostThread, formatPostThreadWithAiPrefs, filterThreadByAiPreferences } from "./llm-preprocessor.js";
 import { resourcesList } from './resources.js';
@@ -141,7 +142,6 @@ export function registerTools(
 
         let allPosts: any[] = [];
         let nextCursor: string | undefined = undefined;
-        let pageFetchCount = 0;
 
         if (isCursorMode) {
           // Single-page fetch starting from the cursor
@@ -178,7 +178,6 @@ export function registerTools(
             }
 
             const { feed, cursor: pageCursor } = response.data;
-            pageFetchCount++;
 
             // Filter posts based on time window if using hours limit
             let filteredFeed = feed;
@@ -227,10 +226,10 @@ export function registerTools(
         const result = await filterPostsByAiPrefs(agent, allPosts, "timeline");
         let responseText = result.text;
 
-        // Expose cursor for pagination when more results may be available
-        // Only signal in cursor mode (explicit page request) or if we fetched multiple pages
-        // (meaning the API has more pages beyond what we fetched)
-        if (nextCursor && allPosts.length > 0 && (isCursorMode || pageFetchCount > 1)) {
+        // Expose the cursor whenever the API returned one: every page is fetched with
+        // the exact remaining need, so a cursor means more results exist past this one.
+        // type="hours" ignores cursors, so no signal in that mode.
+        if (nextCursor && allPosts.length > 0 && type !== "hours") {
           responseText += `\n[More timeline posts available — pass cursor="${nextCursor}" to continue.]`;
         }
 
@@ -270,7 +269,6 @@ export function registerTools(
 
         let allNotifications: any[] = [];
         let nextCursor: string | undefined = undefined;
-        let pageFetchCount = 0;
 
         if (isCursorMode) {
           // Single-page fetch starting from the cursor
@@ -302,7 +300,6 @@ export function registerTools(
             }
 
             const { notifications, cursor: pageCursor } = response.data;
-            pageFetchCount++;
             allNotifications = allNotifications.concat(notifications);
             nextCursor = pageCursor;
 
@@ -361,9 +358,9 @@ export function registerTools(
       }
 
       let responseText = output;
-      // Expose cursor for pagination when more results may be available
-      // Only signal in cursor mode or if we fetched multiple pages
-      if (nextCursor && filteredNotifications.length > 0 && (isCursorMode || pageFetchCount > 1)) {
+      // Expose the cursor whenever the API returned one: every page is fetched with
+      // the exact remaining need, so a cursor means more results exist past this one.
+      if (nextCursor && filteredNotifications.length > 0) {
         responseText += `\n[More notifications available — pass cursor="${nextCursor}" to continue.]`;
       }
 
@@ -576,9 +573,11 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
       }
 
       try {
-        // Validate the URI format
-        if (!uri.startsWith('at://did:plc:') || !uri.includes('/app.bsky.feed.post/')) {
-          return mcpErrorResponse("Invalid post URI format. Expected format: at://did:plc:abcdef/app.bsky.feed.post/123");
+        // Validate the URI format. Any DID method is valid on the AT Protocol
+        // (did:plc, did:web, ...), so the check must not assume did:plc.
+        const postUri = parsePostUri(uri);
+        if (!postUri) {
+          return mcpErrorResponse("Invalid post URI format. Expected format: at://<did>/app.bsky.feed.post/<rkey> (e.g., at://did:plc:abcdef/app.bsky.feed.post/123)");
         }
 
         const response = await agent.app.bsky.feed.getPostThread({
@@ -592,7 +591,7 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
         }
 
         // Enforce AI preferences on thread replies (requested post always shown for context)
-        const rootDid = uri.split('/')[2];
+        const rootDid = postUri.did;
         const allowedMap = await batchCheckAiPreferences(agent as any, [rootDid]);
         const filteredThread = filterThreadByAiPreferences(response.data.thread, allowedMap);
 
@@ -755,7 +754,6 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
 
         let allLikes: any[] = [];
         let nextCursor: string | undefined = undefined;
-        let pageFetchCount = 0;
 
         if (isCursorMode) {
           // Single-page fetch starting from the cursor
@@ -792,7 +790,6 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
             }
 
             const { feed, cursor: pageCursor } = response.data;
-            pageFetchCount++;
             allLikes = allLikes.concat(feed);
             nextCursor = pageCursor;
             batchCount++;
@@ -811,9 +808,9 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
         const result = await filterPostsByAiPrefs(agent, allLikes, "liked posts");
         let responseText = result.text;
 
-        // Expose cursor for pagination when more results may be available
-        // Only signal in cursor mode or if we fetched multiple pages
-        if (nextCursor && allLikes.length > 0 && (isCursorMode || pageFetchCount > 1)) {
+        // Expose the cursor whenever the API returned one: every page is fetched with
+        // the exact remaining need, so a cursor means more results exist past this one.
+        if (nextCursor && allLikes.length > 0) {
           responseText += `\n\n[More liked posts available — pass cursor="${nextCursor}" to continue.]`;
         }
 
@@ -849,36 +846,55 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
         }
 
         const { topics, suggested } = response.data;
+        const trendingList = Array.isArray(topics) ? topics : [];
+        const suggestedList = Array.isArray(suggested) ? suggested : [];
 
-        if (!topics || topics.length === 0) {
+        // An empty trending list must not hide suggested topics — check both lists
+        // before concluding there is nothing to show.
+        if (trendingList.length === 0 && suggestedList.length === 0) {
           return mcpSuccessResponse("No trending topics found at this time.");
         }
 
-        // Format trending topics
-        const formattedTopics = topics.map((topic: any, index: number) => {
-          const startTime = new Date(topic.startTime).toLocaleString();
-          return `#${index + 1}: ${topic.topic}
-Post Count: ${topic.postCount} posts
-Started Trending: ${startTime}
-Feed Link: ${process.env.BSKY_WEB_URL || 'https://bsky.app'}${topic.link}
----`;
-        }).join("\n\n");
+        // app.bsky.unspecced has no stability guarantee: topic fields come and go
+        // (postCount/startTime are no longer returned by bsky.social), so only print
+        // the fields the response actually carries instead of "undefined"/"Invalid Date".
+        const formatTopic = (topic: any, index: number) => {
+          const webUrl = process.env.BSKY_WEB_URL || 'https://bsky.app';
+          const lines = [`#${index + 1}: ${topic.displayName || topic.topic}`];
+          if (topic.postCount !== undefined && topic.postCount !== null) {
+            lines.push(`Post Count: ${topic.postCount} posts`);
+          }
+          if (topic.startTime) {
+            const started = new Date(topic.startTime);
+            if (!Number.isNaN(started.getTime())) {
+              lines.push(`Started Trending: ${started.toLocaleString()}`);
+            }
+          }
+          if (topic.description) {
+            lines.push(`Description: ${topic.description}`);
+          }
+          if (topic.link) {
+            lines.push(`Feed Link: ${webUrl}${topic.link}`);
+          }
+          lines.push('---');
+          return lines.join("\n");
+        };
+
+        const formattedTopics = trendingList.map(formatTopic).join("\n\n");
 
         // Format suggested topics if requested
         let suggestedContent = "";
-        if (includeSuggested && suggested && suggested.length > 0) {
-          const formattedSuggested = suggested.map((topic: any, index: number) => {
-            return `#${index + 1}: ${topic.topic}
-Feed Link: ${process.env.BSKY_WEB_URL || 'https://bsky.app'}${topic.link}
----`;
-          }).join("\n\n");
-
-          suggestedContent = `\n\n## Suggested Topics for Exploration\n\n${formattedSuggested}`;
+        if (includeSuggested && suggestedList.length > 0) {
+          suggestedContent = `\n\n## Suggested Topics for Exploration\n\n${suggestedList.map(formatTopic).join("\n\n")}`;
         }
 
-        return mcpSuccessResponse(`## Current Trending Topics on Bluesky\n\n${formattedTopics}${suggestedContent}`);
+        const heading = trendingList.length > 0
+          ? "## Current Trending Topics on Bluesky"
+          : "## Suggested Topics on Bluesky";
+
+        return mcpSuccessResponse(`${heading}\n\n${formattedTopics}${suggestedContent}`);
       } catch (error) {
-        return mcpErrorResponse(`Error fetching trending topics: ${error instanceof Error ? error.message : String(error)}`);
+        return mcpErrorResponse(`Trending topics endpoint unavailable: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   );
@@ -1197,7 +1213,6 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
         let allPosts: any[] = [];
         let nextCursor: string | undefined = undefined;
-        let pageFetchCount = 0;
 
         if (isCursorMode) {
           // Single-page fetch starting from the cursor
@@ -1235,7 +1250,6 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
             }
 
             const { feed: feedPosts, cursor: pageCursor } = response.data;
-            pageFetchCount++;
 
             // Filter posts based on time window if using hours limit
             let filteredFeed = feedPosts;
@@ -1285,9 +1299,10 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
         const result = await filterPostsByAiPrefs(agent, allPosts, "feed");
         let responseText = result.text;
 
-        // Expose cursor for pagination when more results may be available
-        // Only signal in cursor mode or if we fetched multiple pages
-        if (nextCursor && allPosts.length > 0 && (isCursorMode || pageFetchCount > 1)) {
+        // Expose the cursor whenever the API returned one: every page is fetched with
+        // the exact remaining need, so a cursor means more results exist past this one.
+        // type="hours" ignores cursors, so no signal in that mode.
+        if (nextCursor && allPosts.length > 0 && type !== "hours") {
           responseText += `\n[More feed posts available — pass cursor="${nextCursor}" to continue.]`;
         }
 
@@ -1326,7 +1341,6 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
         let allPosts: any[] = [];
         let nextCursor: string | undefined = undefined;
-        let pageFetchCount = 0;
 
         if (isCursorMode) {
           // Single-page fetch starting from the cursor
@@ -1364,7 +1378,6 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
             }
 
             const { feed, cursor: pageCursor } = response.data;
-            pageFetchCount++;
 
             // Filter posts based on time window if using hours limit
             let filteredFeed = feed;
@@ -1414,9 +1427,10 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
         const result = await filterPostsByAiPrefs(agent, allPosts, "list");
         let responseText = result.text;
 
-        // Expose cursor for pagination when more results may be available
-        // Only signal in cursor mode or if we fetched multiple pages
-        if (nextCursor && allPosts.length > 0 && (isCursorMode || pageFetchCount > 1)) {
+        // Expose the cursor whenever the API returned one: every page is fetched with
+        // the exact remaining need, so a cursor means more results exist past this one.
+        // type="hours" ignores cursors, so no signal in that mode.
+        if (nextCursor && allPosts.length > 0 && type !== "hours") {
           responseText += `\n[More list posts available — pass cursor="${nextCursor}" to continue.]`;
         }
 
@@ -1463,7 +1477,6 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
           let allPosts: any[] = [];
           let nextCursor: string | undefined = undefined;
-          let pageFetchCount = 0;
 
           if (isCursorMode) {
             // Single-page fetch starting from the cursor
@@ -1503,7 +1516,6 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
               }
 
               const { feed, cursor: pageCursor } = response.data;
-              pageFetchCount++;
 
               // Filter posts based on time window if using hours limit
               let filteredFeed = feed;
@@ -1553,9 +1565,10 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
           const result = await filterPostsByAiPrefs(agent, allPosts, "user");
           let responseText = result.text;
 
-          // Expose cursor for pagination when more results may be available
-          // Only signal in cursor mode or if we fetched multiple pages
-          if (nextCursor && allPosts.length > 0 && (isCursorMode || pageFetchCount > 1)) {
+          // Expose the cursor whenever the API returned one: every page is fetched with
+          // the exact remaining need, so a cursor means more results exist past this one.
+          // type="hours" ignores cursors, so no signal in that mode.
+          if (nextCursor && allPosts.length > 0 && type !== "hours") {
             responseText += `\n[More posts from @${user} available — pass cursor="${nextCursor}" to continue.]`;
           }
 
@@ -1882,7 +1895,7 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
 
   server.tool(
     "run-mention-monitor",
-    "Poll Bluesky notifications for mentions of the authenticated user and optionally auto-reply. When poll=false, returns last known state from the mention store (pending/replied/failed counts). When poll=true, fetches recent mentions, deduplicates against already-handled entries, applies AI preference filtering, and can auto-generate replies.",
+    "Poll Bluesky notifications for mentions of the authenticated user and optionally auto-reply. When poll=false, returns last known state from the mention store (pending/replied/failed/skipped counts). When poll=true, fetches recent mentions, deduplicates against already-handled entries, applies AI preference filtering, and can auto-generate replies.",
     {
       poll: z.boolean().default(true)
         .describe("If true, poll for new mentions; if false, just return last known state"),
@@ -1902,14 +1915,16 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
           let pendingCount = 0;
           let repliedCount = 0;
           let failedCount = 0;
+          let skippedEntryCount = 0;
 
           for (const entry of allEntries) {
             if (entry.status === "pending") pendingCount++;
             else if (entry.status === "replied") repliedCount++;
             else if (entry.status === "failed") failedCount++;
+            else if (entry.status === "skipped") skippedEntryCount++;
           }
 
-          const text = `Mention monitor state:\n  Pending: ${pendingCount}\n  Replied: ${repliedCount}\n  Failed: ${failedCount}`;
+          const text = `Mention monitor state:\n  Pending: ${pendingCount}\n  Replied: ${repliedCount}\n  Failed: ${failedCount}\n  Skipped: ${skippedEntryCount} (author opted out; reconsidered on a later poll)`;
           return mcpSuccessResponse(text);
         } catch (error) {
           return mcpErrorResponse(`Error reading mention store: ${error instanceof Error ? error.message : String(error)}`);
@@ -1927,6 +1942,7 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
         let newMentions = 0;
         let repliedCount = 0;
         let skippedCount = 0;
+        let policySkippedCount = 0;
         let failedCount = 0;
         const errors: string[] = [];
 
@@ -1954,7 +1970,7 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
 
           const notifUri = notification.uri;
 
-          // Validate post URI format: at://did:plc:.../app.bsky.feed.post/<rkey>
+          // Validate post URI format: at://<did>/app.bsky.feed.post/<rkey> (any DID method)
           if (typeof notifUri !== 'string' || !/^at:\/\/did:[^/]+\/app\.bsky\.feed\.post\/[^/]+$/.test(notifUri)) {
             // Mark as failed and continue
             try { await store.markFailed(notifUri, "Invalid post URI format"); } catch {}
@@ -1963,7 +1979,8 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
             continue;
           }
 
-          // Deduplication: skip if already handled (replied or failed)
+          // Deduplication: skip if already handled (replied or failed).
+          // "skipped" is deliberately not terminal, so a skipped mention is reconsidered.
           const isHandled = await store.isHandled(notifUri);
           if (isHandled) {
             skippedCount++;
@@ -1988,9 +2005,11 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
           }
 
           if (aiPrefDenied && autoReply) {
-            // Skip auto-reply for AI-pref denied users but mark as handled
-            try { await store.markFailed(notifUri, "AI preference denied"); } catch {}
-            skippedCount++;
+            // "Author opted out" is not a failure: record it as skipped so the store
+            // does not treat the mention as handled. If the author later allows
+            // inference, a subsequent poll can reply after all.
+            try { await store.markSkipped(notifUri, "Author has opted out of AI inference/training"); } catch {}
+            policySkippedCount++;
             continue;
           }
 
@@ -2102,7 +2121,10 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
         output += `  Scanned ${scannedCount} notifications\n`;
         output += `  Found ${newMentions} new mentions\n`;
         output += `  ${repliedCount} mention(s) replied to automatically\n`;
-        output += `  ${skippedCount} mention(s) skipped (already handled / AI preference denied)\n`;
+        output += `  ${skippedCount} mention(s) skipped (already handled)\n`;
+        if (policySkippedCount > 0) {
+          output += `  ${policySkippedCount} mention(s) skipped (author AI preference opt-out; reconsidered on a later poll)\n`;
+        }
 
         if (failedCount > 0) {
           output += `  ${failedCount} mention(s) failed with errors\n`;
@@ -2173,88 +2195,105 @@ Description: ${resource.description}
 
         const mentionStore = getMentionStore();
         const formattedItems: string[] = [];
+        const skipped: string[] = [];
 
         for (const notification of notifications) {
           const notifUri = notification.uri;
-          if (typeof notifUri !== 'string' || !/^at:\/\/did:[^/]+\/app\.bsky\.feed\.post\/[^/]+$/.test(notifUri)) {
-            return mcpErrorResponse("Invalid post URI format in notification");
-          }
 
-          // Deduplication: skip if already handled
-          const isHandled = await mentionStore.isHandled(notifUri);
-          if (isHandled) {
+          // One bad notification must not take down the whole batch — mark it and
+          // move on, the same way run-mention-monitor handles per-mention failures.
+          if (!parsePostUri(notifUri)) {
+            skipped.push("invalid post URI format");
             continue;
           }
 
-          // Fetch thread context
-          const threadContext = await fetchThreadContext(agent as any, notifUri);
-          const rawThread = threadContext.rawThread || threadContext.thread;
-
-          // Extract participant DIDs (including mention notification author)
-          const threadDids = rawThread ? getDidsFromThread(rawThread) : [];
-          const notifAuthorDid = notification.author?.did;
-          const dids = Array.from(new Set([
-            ...(threadContext.participants || []),
-            ...threadDids,
-            ...(notifAuthorDid ? [notifAuthorDid] : [])
-          ]));
-
-          // Batch-check AI preferences
-          const allowedMap = await batchCheckAiPreferences(agent as any, dids);
-
-          // Format thread with AI preferences (allowRequestedPost = false so author denials are respected)
-          let formattedThread = '';
           try {
-            formattedThread = formatPostThreadWithAiPrefs(rawThread, allowedMap, false);
-          } catch {
-            formattedThread = '<posts>\n  <error>Failed to format thread</error>\n</posts>';
-          }
-
-          // Status & post text
-          const authorDid = notifAuthorDid || rawThread?.post?.author?.did;
-          const isAuthorDenied = authorDid ? allowedMap.get(authorDid) === false : false;
-          const status = isAuthorDenied ? 'excluded_by_ai_prefs' : 'visible';
-
-          const postText = isAuthorDenied
-            ? '[Post excluded by author AI preferences]'
-            : (notification.record?.text || rawThread?.post?.record?.text || '');
-
-          // Mention header line
-          const authorHandle = cleanHandle(notification.author?.handle || rawThread?.post?.author?.handle || 'unknown');
-          let header = `@${authorHandle} mentioned you`;
-
-          const isReply = !!(notification.record?.reply || rawThread?.parent || rawThread?.post?.record?.reply);
-          if (isReply) {
-            let rootNode = rawThread;
-            while (rootNode?.parent && rootNode.parent.post) {
-              rootNode = rootNode.parent;
+            // Deduplication: skip if already handled
+            const isHandled = await mentionStore.isHandled(notifUri);
+            if (isHandled) {
+              continue;
             }
-            let rootTitle = 'a post';
-            const rootAuthorDid = rootNode?.post?.author?.did;
-            const isRootDenied = rootAuthorDid ? allowedMap.get(rootAuthorDid) === false : false;
-            const rootText = !isRootDenied ? rootNode?.post?.record?.text : undefined;
-            if (rootText) {
-              rootTitle = `"${rootText.length > 50 ? rootText.slice(0, 47) + '...' : rootText}"`;
-            } else if (rootNode?.post?.author?.handle) {
-              rootTitle = `@${cleanHandle(rootNode.post.author.handle)}'s post`;
+
+            // Fetch thread context
+            const threadContext = await fetchThreadContext(agent as any, notifUri);
+            const rawThread = threadContext.rawThread || threadContext.thread;
+
+            // Extract participant DIDs (including mention notification author)
+            const threadDids = rawThread ? getDidsFromThread(rawThread) : [];
+            const notifAuthorDid = notification.author?.did;
+            const dids = Array.from(new Set([
+              ...(threadContext.participants || []),
+              ...threadDids,
+              ...(notifAuthorDid ? [notifAuthorDid] : [])
+            ]));
+
+            // Batch-check AI preferences
+            const allowedMap = await batchCheckAiPreferences(agent as any, dids);
+
+            // Format thread with AI preferences (allowRequestedPost = false so author denials are respected)
+            let formattedThread = '';
+            try {
+              formattedThread = formatPostThreadWithAiPrefs(rawThread, allowedMap, false);
+            } catch {
+              formattedThread = '<posts>\n  <error>Failed to format thread</error>\n</posts>';
             }
-            header += ` in a reply to ${rootTitle}`;
-          } else {
-            header += ` in a post`;
+
+            // Status & post text
+            const authorDid = notifAuthorDid || rawThread?.post?.author?.did;
+            const isAuthorDenied = authorDid ? allowedMap.get(authorDid) === false : false;
+            const status = isAuthorDenied ? 'excluded_by_ai_prefs' : 'visible';
+
+            const postText = isAuthorDenied
+              ? '[Post excluded by author AI preferences]'
+              : (notification.record?.text || rawThread?.post?.record?.text || '');
+
+            // Mention header line
+            const authorHandle = cleanHandle(notification.author?.handle || rawThread?.post?.author?.handle || 'unknown');
+            let header = `@${authorHandle} mentioned you`;
+
+            const isReply = !!(notification.record?.reply || rawThread?.parent || rawThread?.post?.record?.reply);
+            if (isReply) {
+              let rootNode = rawThread;
+              while (rootNode?.parent && rootNode.parent.post) {
+                rootNode = rootNode.parent;
+              }
+              let rootTitle = 'a post';
+              const rootAuthorDid = rootNode?.post?.author?.did;
+              const isRootDenied = rootAuthorDid ? allowedMap.get(rootAuthorDid) === false : false;
+              const rootText = !isRootDenied ? rootNode?.post?.record?.text : undefined;
+              if (rootText) {
+                rootTitle = `"${rootText.length > 50 ? rootText.slice(0, 47) + '...' : rootText}"`;
+              } else if (rootNode?.post?.author?.handle) {
+                rootTitle = `@${cleanHandle(rootNode.post.author.handle)}'s post`;
+              }
+              header += ` in a reply to ${rootTitle}`;
+            } else {
+              header += ` in a post`;
+            }
+
+            const time = notification.indexedAt || notification.record?.createdAt || new Date().toISOString();
+
+            const itemIndex = formattedItems.length + 1;
+            const block = `${itemIndex}. ${header}\n   Post: "${postText}"\n   Thread: ${formattedThread}\n   Time: ${time}\n   Status: ${status}`;
+            formattedItems.push(block);
+          } catch (error) {
+            // A mention whose thread can't be fetched (deleted, blocked, network) is
+            // reported, not fatal — the remaining mentions are still returned.
+            skipped.push(`${notifUri}: ${error instanceof Error ? error.message : String(error)}`);
           }
-
-          const time = notification.indexedAt || notification.record?.createdAt || new Date().toISOString();
-
-          const itemIndex = formattedItems.length + 1;
-          const block = `${itemIndex}. ${header}\n   Post: "${postText}"\n   Thread: ${formattedThread}\n   Time: ${time}\n   Status: ${status}`;
-          formattedItems.push(block);
         }
 
         if (formattedItems.length === 0) {
+          if (skipped.length > 0) {
+            return mcpSuccessResponse(`No usable mentions found. ${skipped.length} mention(s) skipped:\n${skipped.map(s => `- ${s}`).join('\n')}`);
+          }
           return mcpSuccessResponse("No recent mentions found.");
         }
 
-        const resultText = `Retrieved ${formattedItems.length} mention(s):\n\n${formattedItems.join('\n\n')}`;
+        let resultText = `Retrieved ${formattedItems.length} mention(s):\n\n${formattedItems.join('\n\n')}`;
+        if (skipped.length > 0) {
+          resultText += `\n\n[${skipped.length} mention(s) skipped: ${skipped.join('; ')}]`;
+        }
         return mcpSuccessResponse(resultText);
       } catch (error) {
         return mcpErrorResponse(`Error fetching mentions: ${error instanceof Error ? error.message : String(error)}`);
@@ -2277,9 +2316,10 @@ Description: ${resource.description}
       }
 
       try {
-        // Validate URI format
-        if (!uri || !uri.startsWith('at://did:plc:') || !uri.includes('/app.bsky.feed.post/')) {
-          return mcpErrorResponse("Invalid post URI format. Expected format: at://did:plc:abcdef/app.bsky.feed.post/123");
+        // Validate URI format — any DID method is accepted (did:plc, did:web, ...)
+        const postUri = parsePostUri(uri);
+        if (!postUri) {
+          return mcpErrorResponse("Invalid post URI format. Expected format: at://<did>/app.bsky.feed.post/<rkey> (e.g., at://did:plc:abcdef/app.bsky.feed.post/123)");
         }
 
         // Check mention deduplication — skip if already replied
@@ -2340,8 +2380,9 @@ Description: ${resource.description}
           try {
             const allowedMap = await batchCheckAiPreferences(agent as any, [targetAuthorDid]);
             if (allowedMap.get(targetAuthorDid) === false) {
-              // Mark as failed so it can be retried later with different prefs
-              await mentionStore.markFailed(uri, "Target author has opted out of AI preferences");
+              // Not a failure: record a skip so the mention stays reconsiderable if the
+              // author later allows inference, instead of being written off by isHandled().
+              await mentionStore.markSkipped(uri, "Target author has opted out of AI inference/training");
               return mcpErrorResponse(`Cannot reply: the target post's author (${targetAuthorDid}) has opted out of AI inference/training.`);
             }
           } catch (_err) {

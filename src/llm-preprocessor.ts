@@ -78,6 +78,18 @@ function createBskyUrl(uri: string, handle?: string): string {
 }
 
 /**
+ * Build a space-separated XML attribute string from ordered [key, value] pairs.
+ * Every value is escaped with escapeXml, so user-controlled strings (display
+ * names, handles, URIs) can never close an attribute early or inject extra
+ * attributes — escaping is by construction, not by memory.
+ * @param entries Ordered [key, value] pairs; attribute order is preserved.
+ * @returns Attributes rendered as `key="escaped-value"`, joined by spaces.
+ */
+function xmlAttrs(entries: Array<readonly [string, string]>): string {
+  return entries.map(([key, value]) => `${key}="${escapeXml(value)}"`).join(' ');
+}
+
+/**
  * Determines the post type based on its properties
  */
 function determinePostType(post: AppBskyFeedDefs.PostView, reason?: AppBskyFeedDefs.ReasonRepost): string[] {
@@ -114,7 +126,11 @@ function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
     // Create a repost element with the reposter's info
     const reasonRepost = reason as AppBskyFeedDefs.ReasonRepost;
     const formattedDate = formatDate(reasonRepost.indexedAt || '');
-    let result = `  <repost author_name="${reasonRepost.by.displayName || ''}" author_handle="${reasonRepost.by.handle}" reposted_at="${formattedDate}">\n`;
+    let result = `  <repost ${xmlAttrs([
+      ['author_name', reasonRepost.by.displayName || ''],
+      ['author_handle', reasonRepost.by.handle],
+      ['reposted_at', formattedDate],
+    ])}>\n`;
     
     // Format the original post (without the repost type)
     const types = determinePostType(post);
@@ -123,7 +139,14 @@ function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
     const postDate = formatDate(record.createdAt);
     
     // Add the post inside the repost
-    result += `    <post type="${types.join(',')}" uri="${post.uri}" bsky_url="${bskyUrl}" author_name="${post.author.displayName || ''}" author_handle="${post.author.handle}" posted_at="${postDate}">\n`;
+    result += `    <post ${xmlAttrs([
+      ['type', types.join(',')],
+      ['uri', post.uri],
+      ['bsky_url', bskyUrl],
+      ['author_name', post.author.displayName || ''],
+      ['author_handle', post.author.handle],
+      ['posted_at', postDate],
+    ])}>\n`;
     result += `      <content>\n        ${facetsToMarkdown(record.text, record.facets)}\n      </content>\n`;
     
     // Add embeds
@@ -146,12 +169,19 @@ function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
   const postDate = formatDate(record.createdAt);
   
   // Start building the post tag with all the attributes
-  let postAttrs = `type="${types.join(',')}" uri="${post.uri}" bsky_url="${bskyUrl}" author_name="${post.author.displayName || ''}" author_handle="${post.author.handle}" posted_at="${postDate}"`;
+  let postAttrs = xmlAttrs([
+    ['type', types.join(',')],
+    ['uri', post.uri],
+    ['bsky_url', bskyUrl],
+    ['author_name', post.author.displayName || ''],
+    ['author_handle', post.author.handle],
+    ['posted_at', postDate],
+  ]);
   
   // Add reply_to attribute if this is a reply
   if (reply && types.includes('reply') && reply.parent.$type === 'app.bsky.feed.defs#postView') {
     const parentUri = (reply.parent as AppBskyFeedDefs.PostView).uri;
-    postAttrs += ` reply_to="${parentUri}"`;
+    postAttrs += ` ${xmlAttrs([['reply_to', parentUri]])}`;
   }
   
   // Start the post tag with all attributes
@@ -168,7 +198,13 @@ function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
       const quotedUrl = createBskyUrl(recordView.uri, recordView.author.handle);
       const quotedRecord = recordView.value as { text: string; createdAt: string };
       const quotedPostDate = formatDate(quotedRecord.createdAt);
-      result += `    \n    <quoted_post uri="${recordView.uri}" bsky_url="${quotedUrl}" author_name="${recordView.author.displayName || ''}" author_handle="${recordView.author.handle}" posted_at="${quotedPostDate}">\n`;
+      result += `    \n    <quoted_post ${xmlAttrs([
+        ['uri', recordView.uri],
+        ['bsky_url', quotedUrl],
+        ['author_name', recordView.author.displayName || ''],
+        ['author_handle', recordView.author.handle],
+        ['posted_at', quotedPostDate],
+      ])}>\n`;
       result += `      <content>\n        ${facetsToMarkdown(quotedRecord.text, (quotedRecord as any).facets)}\n      </content>\n`;
       result += `      \n      Engagement: ${recordView.likeCount || 0} likes, ${recordView.repostCount || 0} reposts, ${recordView.replyCount || 0} replies\n`;
       result += `    </quoted_post>\n`;
@@ -199,8 +235,8 @@ function formatEmbeds(post: AppBskyFeedDefs.PostView, indentation: string = ''):
       const imagesEmbed = post.embed as AppBskyEmbedImages.View;
       if (imagesEmbed.images) {
         imagesEmbed.images.forEach((image) => {
-          result += `${indentation}\n${indentation}<embed type="image">\n`;
-          result += `${indentation}  Image description: "${image.alt || 'No description provided'}"\n`;
+          result += `${indentation}\n${indentation}<embed ${xmlAttrs([['type', 'image']])}>\n`;
+          result += `${indentation}  Image description: "${escapeXml(image.alt || 'No description provided')}"\n`;
           result += `${indentation}  Image URL: ${image.fullsize || image.thumb || ''}\n`;
           result += `${indentation}</embed>\n`;
         });
@@ -210,17 +246,17 @@ function formatEmbeds(post: AppBskyFeedDefs.PostView, indentation: string = ''):
     else if (post.embed.$type === 'app.bsky.embed.external#view') {
       const externalEmbed = post.embed as AppBskyEmbedExternal.View;
       if (externalEmbed.external) {
-        result += `${indentation}\n${indentation}<embed type="link">\n`;
-        result += `${indentation}  Title: "${externalEmbed.external.title}"\n`;
+        result += `${indentation}\n${indentation}<embed ${xmlAttrs([['type', 'link']])}>\n`;
+        result += `${indentation}  Title: "${escapeXml(externalEmbed.external.title)}"\n`;
         result += `${indentation}  URL: ${externalEmbed.external.uri}\n`;
-        result += `${indentation}  Description: "${externalEmbed.external.description}"\n`;
+        result += `${indentation}  Description: "${escapeXml(externalEmbed.external.description)}"\n`;
         result += `${indentation}</embed>\n`;
       }
     }
     // Videos
     else if (post.embed.$type.includes('video')) {
       const videoEmbed = post.embed as AppBskyEmbedVideo.View;
-      result += `${indentation}\n${indentation}<embed type="video">\n`;
+      result += `${indentation}\n${indentation}<embed ${xmlAttrs([['type', 'video']])}>\n`;
       if (videoEmbed.thumbnail) {
         result += `${indentation}  Thumbnail: ${videoEmbed.thumbnail || ''}\n`;
       }
@@ -367,7 +403,11 @@ function formatTombstone(tombstone: any, indent: string = ''): string {
   const authorHandle = post?.author?.handle || 'unknown';
   const uri = post?.uri || '';
 
-  return `${indent}<excluded_post reason="ai_preferences" author_handle="${escapeXml(authorHandle)}" uri="${escapeXml(uri)}">This post is hidden because the author has disabled AI inference/training in their Bluesky preferences.</excluded_post>`;
+  return `${indent}<excluded_post ${xmlAttrs([
+    ['reason', 'ai_preferences'],
+    ['author_handle', authorHandle],
+    ['uri', uri],
+  ])}>This post is hidden because the author has disabled AI inference/training in their Bluesky preferences.</excluded_post>`;
 }
 
 /**
@@ -553,18 +593,23 @@ function formatThreadViewRecursive(
     }
 
     // Start building post tag attributes
-    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
-    postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
-    postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
+    let postAttrs = xmlAttrs([
+      ['type', postType],
+      ['uri', post.uri],
+      ['bsky_url', `${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}`],
+      ['author_name', post.author.displayName || post.author.handle],
+      ['author_handle', post.author.handle],
+      ['posted_at', new Date(post.indexedAt || record.createdAt).toLocaleString()],
+    ]);
 
     // Add reply_to attribute if it's a reply
     if (isReply && record.reply && record.reply.parent && record.reply.parent.uri) {
-      postAttrs += ` reply_to="${record.reply.parent.uri}"`;
+      postAttrs += ` ${xmlAttrs([['reply_to', record.reply.parent.uri]])}`;
     }
 
     // If this is the originally requested post, mark it
     if (isRequestedPost) {
-      postAttrs += ` requested="true"`;
+      postAttrs += ` ${xmlAttrs([['requested', 'true']])}`;
     }
 
     // Format the post opening tag with all attributes
@@ -577,11 +622,13 @@ function formatThreadViewRecursive(
     if (isQuote && post.embed && post.embed.record) {
       const quoted = post.embed.record;
       if (quoted.uri && quoted.author && quoted.author.handle) {
-        output += `${indent}  <quoted_post uri="${quoted.uri}" `;
-        output += `bsky_url="${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
-        output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
-        output += `author_handle="${quoted.author.handle}" `;
-        output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;
+        output += `${indent}  <quoted_post ${xmlAttrs([
+          ['uri', quoted.uri],
+          ['bsky_url', `${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}`],
+          ['author_name', quoted.author.displayName || quoted.author.handle],
+          ['author_handle', quoted.author.handle],
+          ['posted_at', new Date(quoted.indexedAt || Date.now()).toLocaleString()],
+        ])}>\n`;
 
         // Use facetsToMarkdown for quoted content as well
         output += `${indent}    <content>\n${indent}      ${facetsToMarkdown((quoted.value && quoted.value.text) || '', (quoted.value && quoted.value.facets) || [])}\n${indent}    </content>\n`;
@@ -604,7 +651,7 @@ function formatThreadViewRecursive(
         const images = post.embed.images || [];
         for (const image of images) {
           if (!image) continue;
-          output += `${indent}  <embed type="image">\n`;
+          output += `${indent}  <embed ${xmlAttrs([['type', 'image']])}>\n`;
           if (image.alt) {
             output += `${indent}    Image description: "${escapeXml(image.alt)}"\n`;
           }
@@ -616,7 +663,7 @@ function formatThreadViewRecursive(
       }
       // Handle external links
       else if (post.embed.$type === 'app.bsky.embed.external#view' && post.embed.external) {
-        output += `${indent}  <embed type="link">\n`;
+        output += `${indent}  <embed ${xmlAttrs([['type', 'link']])}>\n`;
         if (post.embed.external.title) {
           output += `${indent}    Title: "${escapeXml(post.embed.external.title)}"\n`;
         }
@@ -633,7 +680,7 @@ function formatThreadViewRecursive(
       }
       // Handle videos
       else if (post.embed.$type === 'app.bsky.embed.video#view' && post.embed.video) {
-        output += `${indent}  <embed type="video">\n`;
+        output += `${indent}  <embed ${xmlAttrs([['type', 'video']])}>\n`;
         if (post.embed.video.alt) {
           output += `${indent}    Video description: ${escapeXml(post.embed.video.alt)}\n`;
         }
@@ -796,18 +843,23 @@ function processFilteredThreadViewChain(postChain: any[], indentLevel: number): 
     }
 
     // Start building post tag attributes
-    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
-    postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
-    postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
+    let postAttrs = xmlAttrs([
+      ['type', postType],
+      ['uri', post.uri],
+      ['bsky_url', `${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}`],
+      ['author_name', post.author.displayName || post.author.handle],
+      ['author_handle', post.author.handle],
+      ['posted_at', new Date(post.indexedAt || record.createdAt).toLocaleString()],
+    ]);
 
     // Add reply_to attribute if it's a reply
     if (isReply && record.reply && record.reply.parent && record.reply.parent.uri) {
-      postAttrs += ` reply_to="${record.reply.parent.uri}"`;
+      postAttrs += ` ${xmlAttrs([['reply_to', record.reply.parent.uri]])}`;
     }
 
     // If this is the originally requested post, mark it
     if (rootPost.isRequestedPost) {
-      postAttrs += ` requested="true"`;
+      postAttrs += ` ${xmlAttrs([['requested', 'true']])}`;
     }
 
     // Format the post opening tag with all attributes
@@ -820,11 +872,13 @@ function processFilteredThreadViewChain(postChain: any[], indentLevel: number): 
     if (isQuote && post.embed && post.embed.record) {
       const quoted = post.embed.record;
       if (quoted.uri && quoted.author && quoted.author.handle) {
-        output += `${indent}  <quoted_post uri="${quoted.uri}" `;
-        output += `bsky_url="${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
-        output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
-        output += `author_handle="${quoted.author.handle}" `;
-        output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;
+        output += `${indent}  <quoted_post ${xmlAttrs([
+          ['uri', quoted.uri],
+          ['bsky_url', `${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}`],
+          ['author_name', quoted.author.displayName || quoted.author.handle],
+          ['author_handle', quoted.author.handle],
+          ['posted_at', new Date(quoted.indexedAt || Date.now()).toLocaleString()],
+        ])}>\n`;
 
         // Use facetsToMarkdown for quoted content as well
         output += `${indent}    <content>\n${indent}      ${facetsToMarkdown((quoted.value && quoted.value.text) || '', (quoted.value && quoted.value.facets) || [])}\n${indent}    </content>\n`;
@@ -847,7 +901,7 @@ function processFilteredThreadViewChain(postChain: any[], indentLevel: number): 
         const images = post.embed.images || [];
         for (const image of images) {
           if (!image) continue;
-          output += `${indent}  <embed type="image">\n`;
+          output += `${indent}  <embed ${xmlAttrs([['type', 'image']])}>\n`;
           if (image.alt) {
             output += `${indent}    Image description: "${escapeXml(image.alt)}"\n`;
           }
@@ -859,7 +913,7 @@ function processFilteredThreadViewChain(postChain: any[], indentLevel: number): 
       }
       // Handle external links
       else if (post.embed.$type === 'app.bsky.embed.external#view' && post.embed.external) {
-        output += `${indent}  <embed type="link">\n`;
+        output += `${indent}  <embed ${xmlAttrs([['type', 'link']])}>\n`;
         if (post.embed.external.title) {
           output += `${indent}    Title: "${escapeXml(post.embed.external.title)}"\n`;
         }
@@ -876,7 +930,7 @@ function processFilteredThreadViewChain(postChain: any[], indentLevel: number): 
       }
       // Handle videos
       else if (post.embed.$type === 'app.bsky.embed.video#view' && post.embed.video) {
-        output += `${indent}  <embed type="video">\n`;
+        output += `${indent}  <embed ${xmlAttrs([['type', 'video']])}>\n`;
         if (post.embed.video.alt) {
           output += `${indent}    Video description: ${escapeXml(post.embed.video.alt)}\n`;
         }
@@ -974,18 +1028,23 @@ function processFilteredThreadViewPost(threadViewPost: any, indentLevel: number)
     }
 
     // Start building post tag attributes
-    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
-    postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
-    postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
+    let postAttrs = xmlAttrs([
+      ['type', postType],
+      ['uri', post.uri],
+      ['bsky_url', `${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}`],
+      ['author_name', post.author.displayName || post.author.handle],
+      ['author_handle', post.author.handle],
+      ['posted_at', new Date(post.indexedAt || record.createdAt).toLocaleString()],
+    ]);
 
     // Add reply_to attribute if it's a reply
     if (isReply && record.reply && record.reply.parent && record.reply.parent.uri) {
-      postAttrs += ` reply_to="${record.reply.parent.uri}"`;
+      postAttrs += ` ${xmlAttrs([['reply_to', record.reply.parent.uri]])}`;
     }
 
     // If this is the originally requested post, mark it
     if (threadViewPost.isRequestedPost) {
-      postAttrs += ` requested="true"`;
+      postAttrs += ` ${xmlAttrs([['requested', 'true']])}`;
     }
 
     // Format the post opening tag with all attributes
@@ -998,11 +1057,13 @@ function processFilteredThreadViewPost(threadViewPost: any, indentLevel: number)
     if (isQuote && post.embed && post.embed.record) {
       const quoted = post.embed.record;
       if (quoted.uri && quoted.author && quoted.author.handle) {
-        output += `${indent}  <quoted_post uri="${quoted.uri}" `;
-        output += `bsky_url="${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
-        output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
-        output += `author_handle="${quoted.author.handle}" `;
-        output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;
+        output += `${indent}  <quoted_post ${xmlAttrs([
+          ['uri', quoted.uri],
+          ['bsky_url', `${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}`],
+          ['author_name', quoted.author.displayName || quoted.author.handle],
+          ['author_handle', quoted.author.handle],
+          ['posted_at', new Date(quoted.indexedAt || Date.now()).toLocaleString()],
+        ])}>\n`;
 
         // Use facetsToMarkdown for quoted content as well
         output += `${indent}    <content>\n${indent}      ${facetsToMarkdown((quoted.value && quoted.value.text) || '', (quoted.value && quoted.value.facets) || [])}\n${indent}    </content>\n`;
@@ -1025,7 +1086,7 @@ function processFilteredThreadViewPost(threadViewPost: any, indentLevel: number)
         const images = post.embed.images || [];
         for (const image of images) {
           if (!image) continue;
-          output += `${indent}  <embed type="image">\n`;
+          output += `${indent}  <embed ${xmlAttrs([['type', 'image']])}>\n`;
           if (image.alt) {
             output += `${indent}    Image description: "${escapeXml(image.alt)}"\n`;
           }
@@ -1037,7 +1098,7 @@ function processFilteredThreadViewPost(threadViewPost: any, indentLevel: number)
       }
       // Handle external links
       else if (post.embed.$type === 'app.bsky.embed.external#view' && post.embed.external) {
-        output += `${indent}  <embed type="link">\n`;
+        output += `${indent}  <embed ${xmlAttrs([['type', 'link']])}>\n`;
         if (post.embed.external.title) {
           output += `${indent}    Title: "${escapeXml(post.embed.external.title)}"\n`;
         }
@@ -1054,7 +1115,7 @@ function processFilteredThreadViewPost(threadViewPost: any, indentLevel: number)
       }
       // Handle videos
       else if (post.embed.$type === 'app.bsky.embed.video#view' && post.embed.video) {
-        output += `${indent}  <embed type="video">\n`;
+        output += `${indent}  <embed ${xmlAttrs([['type', 'video']])}>\n`;
         if (post.embed.video.alt) {
           output += `${indent}    Video description: ${escapeXml(post.embed.video.alt)}\n`;
         }
@@ -1191,18 +1252,23 @@ function processThreadViewPostChain(postChain: any[], indentLevel: number): stri
     }
     
     // Start building post tag attributes
-    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
-    postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
-    postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
+    let postAttrs = xmlAttrs([
+      ['type', postType],
+      ['uri', post.uri],
+      ['bsky_url', `${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}`],
+      ['author_name', post.author.displayName || post.author.handle],
+      ['author_handle', post.author.handle],
+      ['posted_at', new Date(post.indexedAt || record.createdAt).toLocaleString()],
+    ]);
     
     // Add reply_to attribute if it's a reply
     if (isReply && record.reply && record.reply.parent && record.reply.parent.uri) {
-      postAttrs += ` reply_to="${record.reply.parent.uri}"`;
+      postAttrs += ` ${xmlAttrs([['reply_to', record.reply.parent.uri]])}`;
     }
     
     // If this is the originally requested post, mark it
     if (rootPost.isRequestedPost) {
-      postAttrs += ` requested="true"`;
+      postAttrs += ` ${xmlAttrs([['requested', 'true']])}`;
     }
     
     // Format the post opening tag with all attributes
@@ -1215,11 +1281,13 @@ function processThreadViewPostChain(postChain: any[], indentLevel: number): stri
     if (isQuote && post.embed && post.embed.record) {
       const quoted = post.embed.record;
       if (quoted.uri && quoted.author && quoted.author.handle) {
-        output += `${indent}  <quoted_post uri="${quoted.uri}" `;
-        output += `bsky_url="${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
-        output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
-        output += `author_handle="${quoted.author.handle}" `;
-        output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;
+        output += `${indent}  <quoted_post ${xmlAttrs([
+          ['uri', quoted.uri],
+          ['bsky_url', `${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}`],
+          ['author_name', quoted.author.displayName || quoted.author.handle],
+          ['author_handle', quoted.author.handle],
+          ['posted_at', new Date(quoted.indexedAt || Date.now()).toLocaleString()],
+        ])}>\n`;
         
         // Use facetsToMarkdown for quoted content as well
         output += `${indent}    <content>\n${indent}      ${facetsToMarkdown((quoted.value && quoted.value.text) || '', (quoted.value && quoted.value.facets) || [])}\n${indent}    </content>\n`;
@@ -1242,7 +1310,7 @@ function processThreadViewPostChain(postChain: any[], indentLevel: number): stri
         const images = post.embed.images || [];
         for (const image of images) {
           if (!image) continue;
-          output += `${indent}  <embed type="image">\n`;
+          output += `${indent}  <embed ${xmlAttrs([['type', 'image']])}>\n`;
           if (image.alt) {
             output += `${indent}    Image description: "${escapeXml(image.alt)}"\n`;
           }
@@ -1254,7 +1322,7 @@ function processThreadViewPostChain(postChain: any[], indentLevel: number): stri
       }
       // Handle external links
       else if (post.embed.$type === 'app.bsky.embed.external#view' && post.embed.external) {
-        output += `${indent}  <embed type="link">\n`;
+        output += `${indent}  <embed ${xmlAttrs([['type', 'link']])}>\n`;
         if (post.embed.external.title) {
           output += `${indent}    Title: "${escapeXml(post.embed.external.title)}"\n`;
         }
@@ -1271,7 +1339,7 @@ function processThreadViewPostChain(postChain: any[], indentLevel: number): stri
       }
       // Handle videos
       else if (post.embed.$type === 'app.bsky.embed.video#view' && post.embed.video) {
-        output += `${indent}  <embed type="video">\n`;
+        output += `${indent}  <embed ${xmlAttrs([['type', 'video']])}>\n`;
         if (post.embed.video.alt) {
           output += `${indent}    Video description: ${escapeXml(post.embed.video.alt)}\n`;
         }
@@ -1360,18 +1428,23 @@ export function processThreadViewPost(threadViewPost: any, indentLevel: number):
     }
     
     // Start building post tag attributes
-    let postAttrs = `type="${postType}" uri="${post.uri}" bsky_url="${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}" `;
-    postAttrs += `author_name="${escapeXml(post.author.displayName || post.author.handle)}" author_handle="${post.author.handle}" `;
-    postAttrs += `posted_at="${new Date(post.indexedAt || record.createdAt).toLocaleString()}"`;
+    let postAttrs = xmlAttrs([
+      ['type', postType],
+      ['uri', post.uri],
+      ['bsky_url', `${BSKY_WEB_URL}/profile/${post.author.handle}/post/${post.uri.split('/').pop()}`],
+      ['author_name', post.author.displayName || post.author.handle],
+      ['author_handle', post.author.handle],
+      ['posted_at', new Date(post.indexedAt || record.createdAt).toLocaleString()],
+    ]);
     
     // Add reply_to attribute if it's a reply
     if (isReply && record.reply && record.reply.parent && record.reply.parent.uri) {
-      postAttrs += ` reply_to="${record.reply.parent.uri}"`;
+      postAttrs += ` ${xmlAttrs([['reply_to', record.reply.parent.uri]])}`;
     }
     
     // If this is the originally requested post, mark it
     if (threadViewPost.isRequestedPost) {
-      postAttrs += ` requested="true"`;
+      postAttrs += ` ${xmlAttrs([['requested', 'true']])}`;
     }
     
     // Format the post opening tag with all attributes
@@ -1384,11 +1457,13 @@ export function processThreadViewPost(threadViewPost: any, indentLevel: number):
     if (isQuote && post.embed && post.embed.record) {
       const quoted = post.embed.record;
       if (quoted.uri && quoted.author && quoted.author.handle) {
-        output += `${indent}  <quoted_post uri="${quoted.uri}" `;
-        output += `bsky_url="${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}" `;
-        output += `author_name="${escapeXml(quoted.author.displayName || quoted.author.handle)}" `;
-        output += `author_handle="${quoted.author.handle}" `;
-        output += `posted_at="${new Date(quoted.indexedAt || Date.now()).toLocaleString()}">\n`;
+        output += `${indent}  <quoted_post ${xmlAttrs([
+          ['uri', quoted.uri],
+          ['bsky_url', `${BSKY_WEB_URL}/profile/${quoted.author.handle}/post/${quoted.uri.split('/').pop()}`],
+          ['author_name', quoted.author.displayName || quoted.author.handle],
+          ['author_handle', quoted.author.handle],
+          ['posted_at', new Date(quoted.indexedAt || Date.now()).toLocaleString()],
+        ])}>\n`;
         
         // Use facetsToMarkdown for quoted content as well
         output += `${indent}    <content>\n${indent}      ${facetsToMarkdown((quoted.value && quoted.value.text) || '', (quoted.value && quoted.value.facets) || [])}\n${indent}    </content>\n`;
@@ -1411,7 +1486,7 @@ export function processThreadViewPost(threadViewPost: any, indentLevel: number):
         const images = post.embed.images || [];
         for (const image of images) {
           if (!image) continue;
-          output += `${indent}  <embed type="image">\n`;
+          output += `${indent}  <embed ${xmlAttrs([['type', 'image']])}>\n`;
           if (image.alt) {
             output += `${indent}    Image description: "${escapeXml(image.alt)}"\n`;
           }
@@ -1423,7 +1498,7 @@ export function processThreadViewPost(threadViewPost: any, indentLevel: number):
       }
       // Handle external links
       else if (post.embed.$type === 'app.bsky.embed.external#view' && post.embed.external) {
-        output += `${indent}  <embed type="link">\n`;
+        output += `${indent}  <embed ${xmlAttrs([['type', 'link']])}>\n`;
         if (post.embed.external.title) {
           output += `${indent}    Title: "${escapeXml(post.embed.external.title)}"\n`;
         }
@@ -1440,7 +1515,7 @@ export function processThreadViewPost(threadViewPost: any, indentLevel: number):
       }
       // Handle videos
       else if (post.embed.$type === 'app.bsky.embed.video#view' && post.embed.video) {
-        output += `${indent}  <embed type="video">\n`;
+        output += `${indent}  <embed ${xmlAttrs([['type', 'video']])}>\n`;
         if (post.embed.video.alt) {
           output += `${indent}    Video description: ${escapeXml(post.embed.video.alt)}\n`;
         }

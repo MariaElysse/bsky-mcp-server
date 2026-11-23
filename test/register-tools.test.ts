@@ -67,7 +67,7 @@ async function testExpectedToolSet() {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name).sort();
     assert.deepEqual(names, [...EXPECTED_TOOLS].sort(),
-      `registered tool set drifted from the 23 expected names`);
+      `registered tool set drifted from the 26 expected names`);
   } finally {
     await close();
   }
@@ -798,7 +798,7 @@ async function main() {
     ["pinned feed and list formatting", testPinnedFeeds],
     ["self/AppView follows and followers", testFollowsAndFollowers],
     ["post likes and list-resources", testPostLikesAndResourceTool],
-    ["registers exactly the expected 23 tools", testExpectedToolSet],
+    ["registers exactly the expected 26 tools", testExpectedToolSet],
     ["tools error out when getAgent returns null", testNullAgentReturnsError],
     ["getAgent is resolved per tool call, not cached", testAgentIsResolvedPerCall],
     ["tool handlers invoke methods on the resolved agent", testAgentMethodIsInvoked],

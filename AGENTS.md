@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**bsky-mcp-server** is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects to [Bluesky](https://bsky.app/) via the ATProtocol. It exposes **23 tools** for LLM applications to interact with Bluesky — reading timelines, searching posts, managing follows, AI-preference filtering, mention handling, and more.
+**bsky-mcp-server** is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects to [Bluesky](https://bsky.app/) via the ATProtocol. It exposes **28 tools** for LLM applications to interact with Bluesky — reading timelines, searching posts, managing follows, AI-preference filtering, mention handling, and more.
 
 **Stack**: TypeScript (ESM, `nodenext` module resolution), Node.js 24, `@atproto/api`, `@modelcontextprotocol/sdk` (v1.7+), Zod for schema validation
 **Package manager**: pnpm 12.3.4 (`packageManager: pnpm@12.3.4`)
@@ -34,15 +34,15 @@ docs/                   # Project documentation (post-format-spec.md)
 | File | Purpose | Lines |
 |------|---------|-------|
 | `src/index.ts` | Server bootstrap, stdio transport, Bluesky auth, environment loading, MCP registration | ~260 |
-| `src/tools.ts` | All 23 tool handlers — pagination, AI preference filtering, link preview, thread context, rich text facets | ~2400 |
+| `src/tools.ts` | All 26 tool handlers — pagination, AI preference filtering, link preview, thread context, rich text facets | ~2460 |
 | `src/ai-preferences.ts` | AI preference system: reads/writes `community.lexicon.preference.ai` records, caches per-DID (5 min TTL), batch-checking, tombstone replacement | ~350 |
-| `src/mention-store.ts` | Persistent mention deduplication store with JSON file backend, atomic writes, concurrency locking | ~340 |
+| `src/mention-store.ts` | Persistent mention deduplication store with JSON file backend, atomic writes, concurrency locking | ~450 |
 | `src/thread-context.ts` | Thread context retrieval and formatting for mention context tool, AI-preference filtering | ~380 |
 | `src/utils.ts` | Shared helpers: `cleanHandle()`, `validateUri()`, `mcpSuccessResponse()`, `mcpErrorResponse()`, `escapeXml()` | ~350 |
-| `src/llm-preprocessor.ts` | Formats raw Bluesky API responses into LLM-friendly text (`docs/post-format-spec.md`), facet-to-markdown, thread formatting | ~1480 |
+| `src/llm-preprocessor.ts` | Formats raw Bluesky API responses into LLM-friendly text (`docs/post-format-spec.md`), facet-to-markdown, thread formatting | ~1560 |
 | `src/link-preview.ts` | Fetches URL metadata via cardyb, uploads thumbnails to Bluesky | — |
 | `test/final-test.ts` | Orchestrator that runs all 12 test suites sequentially | ~70 |
-| `test/pagination.test.ts` | 23 tests covering auto-fetch, cursor mode, hours mode, edge cases | ~800 |
+| `test/pagination.test.ts` | 26 tests covering auto-fetch, cursor mode, hours mode, cursor-signal regressions | ~915 |
 | `docs/post-format-spec.md` | The XML post/thread format every content tool emits | ~265 |
 | `tsconfig.json` | ES2020 target, nodenext modules, strict mode. `"exclude": []` — everything under `src/`, `scripts/`, `test/` must compile | — |
 | `Dockerfile` | Build: install pnpm, install deps, compile TS (uses `node:lts-alpine`) | — |
@@ -114,20 +114,20 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `main`:
 - Each test file is self-contained and runs against the built output in `build/test/`
 - The orchestrator (`test/final-test.ts`) runs all test suites sequentially, printing per-suite pass/fail and a summary
 
-**12 test suites (214 tests total — `pnpm run test` prints the live counts):**
+**12 test suites (236 tests total — `pnpm run test` prints the live counts):**
 
 1. `register-tools` — tool registration, error handling, agent resolution (19 tests)
 2. `url-converter` — Bluesky URL to AT URI parsing (5 tests)
 3. `link-preview` — cardyb extraction, thumbnail upload, error cases (11 tests)
 4. `ai-preferences` — flatten/unflatten, batch check, filter, integration with tools (35 tests)
-5. `ai-preferences-tombstone` — tombstone replacement, thread filtering, XML format (17 tests)
-6. `mention-store` — CRUD, atomic writes, concurrency, cleanup, persistence (32 tests)
+5. `ai-preferences-tombstone` — tombstone replacement, thread filtering, XML format, attribute escaping (21 tests)
+6. `mention-store` — CRUD, atomic writes, concurrency, cleanup, persistence, `skipped` status (47 tests)
 7. `thread-context` — thread fetching, participant extraction, formatting (20 tests)
 8. `mention-context` — mention tool, dedup, AI filtering (14 tests)
 9. `mention-monitor` — poll, auto-reply, dedup across runs (15 tests)
 10. `create-reply` — reply creation, URI validation, facets, dedup (14 tests)
 11. `custom-endpoint` — custom Bluesky frontend URL parsing (9 tests)
-12. `pagination` — auto-fetch, cursor mode, hours mode, edge cases (23 tests)
+12. `pagination` — auto-fetch, cursor mode, hours mode, cursor-signal regressions (26 tests)
 
 ## AI Preference System
 
@@ -155,11 +155,21 @@ When modifying content-fetching tools, ensure they respect AI preferences via `b
 ### Pagination (Cursor-Based)
 6 tools support cursor-based pagination: `get-timeline-posts`, `get-feed-posts`, `get-list-posts`, `get-user-posts`, `get-liked-posts`, `get-notifications`
 
-- **Auto-fetch mode** (no cursor): fetches up to `count` posts via internal pagination, signals `nextCursor` in response if more available
+- **Auto-fetch mode** (no cursor): fetches pages sized to what is still needed (`Math.min(100, count - fetched)`), stopping when `count` is satisfied or the API stops returning a cursor
 - **Cursor mode** (cursor provided): fetches single page starting from cursor, returns up to `count` posts
-- **Hours-based mode** (`type: "hours"`): ignores cursor, fetches fresh results for time window
+- **Cursor signal**: every pagination tool appends `[More posts available — pass cursor="…" to continue.]` whenever the API returned a cursor and the call produced results — **including when `count` was already satisfied**, so a caller can always resume instead of silently losing everything past the first page
+- **Hours-based mode** (`type: "hours"`): ignores cursor, fetches fresh results for time window, and therefore never advertises a cursor
 - Max total posts capped at 500 (`MAX_TOTAL_POSTS`)
 - Default count/limit: 20
+
+### Mention Deduplication Store
+
+`src/mention-store.ts` tracks processed mentions by AT URI with statuses `pending`, `replied`, `failed`, `skipped`:
+
+- `isHandled()` treats `pending` and `skipped` as **non-terminal**; `replied` and `failed` are terminal
+- `skipped` is for policy skips (author opted out of AI inference/training): the mention is re-visited on a later poll, because preferences can flip
+- Never record a policy opt-out as `failed` — that permanently suppresses the mention
+- Display code reads `entry.reason` for skips (`entry.error` is for failures)
 
 ### Response Formatting
 - `llm-preprocessor.ts` implements the post/thread format specified in `docs/post-format-spec.md`

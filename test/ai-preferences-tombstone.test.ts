@@ -711,6 +711,187 @@ async function testAiPreferenceThreadFormattingAndGuards() {
   assert.equal(processThreadViewPost({ $type: THREAD_TYPE, post: { record: {}, uri: "at://x", author: {} } }, 0), "");
 }
 
+// ---------------------------------------------------------------------------
+// XML attribute escaping regression — every attribute value is escaped by
+// construction (xmlAttrs in llm-preprocessor.ts), so user-controlled values
+// such as display names cannot close an attribute early or smuggle extra
+// attributes into <post>/<repost>/<quoted_post>/<excluded_post> tags.
+// ---------------------------------------------------------------------------
+
+function makeEscapingFeedItem({
+  uri = "at://did:plc:alice/app.bsky.feed.post/post1",
+  handle = "alice.test",
+  did = "did:plc:alice",
+  displayName = "Alice",
+  text = "hello",
+}: {
+  uri?: string;
+  handle?: string;
+  did?: string;
+  displayName?: string;
+  text?: string;
+} = {}): any {
+  return {
+    post: {
+      uri,
+      cid: "cid1",
+      author: { did, handle, displayName },
+      record: { text, createdAt: "2026-08-01T12:00:00.000Z", facets: [] },
+      embed: undefined,
+      reposCount: 0,
+      likeCount: 1,
+      repostCount: 2,
+      replyCount: 3,
+      threadView: undefined,
+      indexedAt: "2026-08-01T12:00:00.000Z",
+    },
+    reason: undefined,
+    reply: undefined,
+  };
+}
+
+// Parse the `key="value"` pairs of an opening tag the way an XML consumer
+// would: an unescaped quote inside a value splits the tag and reveals an
+// unexpected attribute name.
+function parseTagAttrs(openTag: RegExpMatchArray): Map<string, string> {
+  const attrs = new Map<string, string>();
+  for (const m of openTag[0].matchAll(/(\w+)="([^"]*)"/g)) {
+    attrs.set(m[1], m[2]);
+  }
+  return attrs;
+}
+
+async function test_xmlAttributeEscaping_feed_displayName_cannot_inject_attributes() {
+  const evil = 'evil" injected="yes';
+
+  // <post> on the feed path (preprocessPost -> formatPost); display names
+  // containing " and > must not produce a parseable extra attribute
+  const postXml = preprocessPost(makeEscapingFeedItem({ displayName: evil }));
+  const postTag = postXml.match(/<post [^>]*>/);
+  assert.ok(postTag, "expected a <post ...> opening tag");
+  const postAttrs = parseTagAttrs(postTag!);
+  assert.equal(postAttrs.get("author_name"), "evil&quot; injected=&quot;yes");
+  assert.ok(!postAttrs.has("injected"), "display name must not add an attribute");
+  assert.doesNotMatch(postXml, / injected="yes"/, "raw quote pair must not appear in output");
+
+  const angleXml = preprocessPost(makeEscapingFeedItem({ displayName: "evil > <x>" }));
+  const angleAttrs = parseTagAttrs(angleXml.match(/<post [^>]*>/)!);
+  assert.equal(angleAttrs.get("author_name"), "evil &gt; &lt;x&gt;");
+  assert.doesNotMatch(angleXml, /<x>/, "angle brackets in display name must stay escaped");
+
+  // <repost> wrapper — author_name/author_handle were previously unescaped
+  const repostItem = makeEscapingFeedItem({});
+  repostItem.reason = {
+    $type: "app.bsky.feed.defs#reasonRepost",
+    by: { did: "did:plc:carrier", handle: "carrier.test", displayName: evil },
+    indexedAt: "2026-08-01T12:00:00.000Z",
+  };
+  const repostXml = preprocessPost(repostItem);
+  const repostTag = repostXml.match(/<repost [^>]*>/);
+  assert.ok(repostTag, "expected a <repost ...> opening tag");
+  const repostAttrs = parseTagAttrs(repostTag!);
+  assert.equal(repostAttrs.get("author_name"), "evil&quot; injected=&quot;yes");
+  assert.ok(!repostAttrs.has("injected"), "repost author name must not add an attribute");
+
+  // <quoted_post> — author_name was previously unescaped
+  const quoteItem = makeEscapingFeedItem({});
+  quoteItem.post.embed = {
+    $type: "app.bsky.embed.record#view",
+    record: {
+      $type: "app.bsky.embed.record#viewRecord",
+      uri: "at://did:plc:bob/app.bsky.feed.post/post2",
+      cid: "cid2",
+      value: { text: "quoted", createdAt: "2026-07-31T12:00:00.000Z" },
+      labels: [],
+      likeCount: 0,
+      repostCount: 0,
+      replyCount: 0,
+      indexedAt: "2026-07-31T12:00:00.000Z",
+      author: { did: "did:plc:bob", handle: "bob.test", displayName: evil },
+    },
+  };
+  const quoteXml = preprocessPost(quoteItem);
+  const quoteTag = quoteXml.match(/<quoted_post [^>]*>/);
+  assert.ok(quoteTag, "expected a <quoted_post ...> opening tag");
+  const quoteAttrs = parseTagAttrs(quoteTag!);
+  assert.equal(quoteAttrs.get("author_name"), "evil&quot; injected=&quot;yes");
+  assert.ok(!quoteAttrs.has("injected"), "quoted author name must not add an attribute");
+
+  // <excluded_post> tombstone — the handle must not smuggle attributes either
+  const tombXml = preprocessPosts([makeTombstone(makeEscapingFeedItem({ handle: evil }))]);
+  const tombTag = tombXml.match(/<excluded_post [^>]*>/);
+  assert.ok(tombTag, "expected an <excluded_post ...> opening tag");
+  const tombAttrs = parseTagAttrs(tombTag!);
+  assert.equal(tombAttrs.get("author_handle"), "evil&quot; injected=&quot;yes");
+  assert.ok(!tombAttrs.has("injected"), "tombstone handle must not add an attribute");
+}
+
+async function test_xmlAttributeEscaping_thread_displayName_cannot_inject_attributes() {
+  const root = makeThreadPost({
+    uri: "at://did:plc:alice/app.bsky.feed.post/root1",
+    handle: "alice.test",
+    text: "root",
+  });
+  root.post.author.displayName = 'evil" injected="yes';
+  const xml = formatPostThread(root);
+  const postTag = xml.match(/<post [^>]*>/);
+  assert.ok(postTag, "expected a <post ...> opening tag");
+  const attrs = parseTagAttrs(postTag!);
+  assert.equal(attrs.get("author_name"), "evil&quot; injected=&quot;yes");
+  assert.ok(!attrs.has("injected"), "thread post author name must not add an attribute");
+}
+
+async function test_xmlAttributeEscaping_values_escaped_exactly_once() {
+  // & in uri/bsky_url (derived from the uri's rkey) must be escaped once
+  const item = makeEscapingFeedItem({
+    uri: "at://did:plc:alice/app.bsky.feed.post/rkey&1",
+    displayName: "Tom & Jerry <3>",
+  });
+  const postTag = preprocessPost(item).match(/<post [^>]*>/)!;
+  const attrs = parseTagAttrs(postTag);
+  assert.equal(attrs.get("uri"), "at://did:plc:alice/app.bsky.feed.post/rkey&amp;1");
+  assert.equal(attrs.get("bsky_url"), "https://bsky.app/profile/alice.test/post/rkey&amp;1");
+  assert.equal(attrs.get("author_name"), "Tom &amp; Jerry &lt;3&gt;");
+  assert.doesNotMatch(postTag[0], /&amp;(amp|lt|gt|quot|apos);/, "no value may be escaped twice");
+
+  // Tombstone values escaped once — formatTombstone used to escape manually;
+  // routing through the shared helper must not double-escape
+  const tomb = preprocessPosts([
+    makeTombstone(makeEscapingFeedItem({
+      uri: "at://did:plc:alice/app.bsky.feed.post/a&b",
+      handle: "a&b.test",
+    })),
+  ]);
+  const tombTag = tomb.match(/<excluded_post [^>]*>/)!;
+  const tombAttrs = parseTagAttrs(tombTag);
+  assert.equal(tombAttrs.get("author_handle"), "a&amp;b.test");
+  assert.equal(tombAttrs.get("uri"), "at://did:plc:alice/app.bsky.feed.post/a&amp;b");
+  assert.doesNotMatch(tombTag[0], /&amp;(amp|lt|gt|quot|apos);/, "no value may be escaped twice");
+}
+
+async function test_xmlAttributeEscaping_benign_feed_output_unchanged() {
+  // Whole-output byte comparison for benign inputs guards the refactor
+  // against formatting churn: attribute order, spacing, and tag shape must
+  // stay byte-identical. posted_at is timezone-dependent, so only its value
+  // is masked; everything around it is compared exactly.
+  const feed = preprocessPosts([makeEscapingFeedItem({})]).replace(
+    /posted_at="[^"]*"/,
+    'posted_at="<D>"'
+  );
+  const expected = [
+    "<posts>",
+    '  <post type="standalone" uri="at://did:plc:alice/app.bsky.feed.post/post1" bsky_url="https://bsky.app/profile/alice.test/post/post1" author_name="Alice" author_handle="alice.test" posted_at="<D>">',
+    "    <content>",
+    "      hello",
+    "    </content>",
+    "    ",
+    "    Engagement: 1 likes, 2 reposts, 3 replies",
+    "  </post>",
+    "</posts>",
+  ].join("\n");
+  assert.equal(feed, expected);
+}
+
 
 // Runner
 // ---------------------------------------------------------------------------
@@ -736,6 +917,10 @@ async function main() {
     ["formatPostThreadWithAiPrefs produces valid XML with tombstones in replies", test_formatPostThreadWithAiPrefs_produces_valid_xml],
     ["formatPostThreadWithAiPrefs works for threads without parents", test_formatPostThreadWithAiPrefs_no_parents],
     ["filterPostsByAiPreferences handles mixed tombstone and normal input", test_filterPostsByAiPreferences_mixed_tombstone_and_normal_input],
+    ["xml attribute escaping: feed display name cannot inject attributes", test_xmlAttributeEscaping_feed_displayName_cannot_inject_attributes],
+    ["xml attribute escaping: thread display name cannot inject attributes", test_xmlAttributeEscaping_thread_displayName_cannot_inject_attributes],
+    ["xml attribute escaping: values escaped exactly once", test_xmlAttributeEscaping_values_escaped_exactly_once],
+    ["xml attribute escaping: benign feed output unchanged", test_xmlAttributeEscaping_benign_feed_output_unchanged],
   ];
 
   await runTests(cases);

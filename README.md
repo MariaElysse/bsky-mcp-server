@@ -81,9 +81,9 @@ get-timeline-posts: { count: 20, type: "posts", cursor: "abc123..." }
 ```
 
 **How it works:**
-- **First call (no cursor):** The tool auto-fetches up to `count` posts by paginating internally. If more results are available, the response includes a cursor.
+- **First call (no cursor):** The tool auto-fetches up to `count` posts by paginating internally. The response advertises a cursor whenever the Bluesky API returned one — including when your requested `count` was already satisfied — so you can always resume where the call stopped instead of silently missing results.
 - **Subsequent calls (with cursor):** The tool fetches a single page starting from the cursor, returning up to `count` posts.
-- **Time-based mode (`type: "hours"`):** Does not support cursor — always starts fresh from the current time window.
+- **Time-based mode (`type: "hours"`):** Does not support cursor — always starts fresh from the current time window, so it never advertises a cursor.
 - **Default `count`:** Most tools default to `count: 20` to keep responses concise. Increase it when you need more results in one call.
 
 ## Post & Thread Format

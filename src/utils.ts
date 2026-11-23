@@ -280,6 +280,20 @@ export function escapeXml(unsafe: string): string {
 }
 
 /**
+ * Parse an AT URI that points at a Bluesky post record.
+ * Accepts any DID method — `did:plc` and `did:web` (and future methods) are all
+ * valid on the AT Protocol, so hard-coding `did:plc` rejects real posts.
+ * @param uri The candidate URI, e.g. at://did:web:example.com/app.bsky.feed.post/3abcd
+ * @returns The actor DID and record key, or null if the URI is not a post URI
+ */
+export function parsePostUri(uri: unknown): { did: string, rkey: string } | null {
+  if (typeof uri !== 'string') return null;
+  const match = /^at:\/\/(did:[^/]+)\/app\.bsky\.feed\.post\/([^/?#\s]+)$/.exec(uri.trim());
+  if (!match) return null;
+  return { did: match[1], rkey: match[2] };
+}
+
+/**
  * Parse a Bluesky web URL and extract the handle and rkey.
  * Works with any AT Protocol-compatible web frontend (bsky.app,
  * blacksky.community, custom instances, etc.).

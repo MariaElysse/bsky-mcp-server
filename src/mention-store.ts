@@ -12,8 +12,20 @@ import os from "node:os";
 // Types
 // ---------------------------------------------------------------------------
 
-/** Status of a single mention entry in the store. */
-export type MentionStatus = "pending" | "replied" | "failed";
+/**
+ * Status of a single mention entry in the store.
+ *
+ * Terminal vs. re-considerable:
+ * - `pending`  — queued or mid-flight; not terminal, `isHandled()` is false.
+ * - `replied`  — a reply was posted; terminal, `isHandled()` is true.
+ * - `failed`   — processing errored; terminal by design (so a broken path isn't
+ *                retried forever), `isHandled()` is true.
+ * - `skipped`  — deliberately not processed under the rules in effect at that
+ *                moment (e.g. the author's AI preference denied inference). Not a
+ *                reply and not a failure, so **not** terminal: `isHandled()` is
+ *                false and a later preference change lets the mention be retried.
+ */
+export type MentionStatus = "pending" | "replied" | "failed" | "skipped";
 
 /** A single record stored on disk. */
 export interface MentionEntry {
@@ -27,8 +39,31 @@ export interface MentionEntry {
   timestamp: number;
   /** Optional URI of the reply that was posted (set on markCompleted). */
   replyUri?: string;
-  /** Optional error message (set on markFailed). */
+  /** Optional error message (set on markFailed; failure-only, never used for skips). */
   error?: string;
+  /**
+   * Optional human-readable reason the mention was skipped (set on markSkipped).
+   * Kept separate from `error` so a skip stays observable — when and why it
+   * happened — without pretending the attempt failed.
+   */
+  reason?: string;
+}
+
+/**
+ * Decide whether a stored status means "this mention is done, never process it
+ * again" — i.e. `replied` or `failed`. `pending` and `skipped` are the two
+ * non-terminal statuses: a skip is a policy decision made under the rules that
+ * applied at the time (author opt-out), so it must stay re-considerable when
+ * those rules change.
+ *
+ * Takes `string` rather than {@link MentionStatus} because it is applied to
+ * unvalidated JSON already on disk. A status value outside the union (legacy or
+ * hand-edited file) counts as terminal on purpose: the store exists to prevent
+ * duplicate replies, so an unrecognised value is treated as already processed
+ * rather than replayed.
+ */
+function isTerminalStatus(status: string): boolean {
+  return status !== "pending" && status !== "skipped";
 }
 
 /** Shape of the JSON file on disk. */
@@ -181,11 +216,29 @@ export class MentionStore {
     this.storePath = storePath ?? resolveStorePath();
   }
 
-  /** Check if a URI has already been processed (replied or failed). */
+  /**
+   * Check whether a mention is finished for good, i.e. whether its stored entry
+   * carries a terminal status (`replied` or `failed`).
+   *
+   * Returns **false** when:
+   * - no entry exists for the URI;
+   * - the entry is `pending` (queued, or interrupted mid-flight);
+   * - the entry is `skipped` — skipping records a decision made under the rules
+   *   in effect at that moment (for example the author's AI preference denied
+   *   inference). That is neither a reply nor an error, so the entry must not
+   *   permanently suppress the mention: if the user later changes their
+   *   preference, the mention has to be reconsidered. Use {@link markSkipped}
+   *   (not {@link markFailed}) for conditions that can change.
+   *
+   * Returns **true** for `replied` (a reply already exists) and for `failed`
+   * (the attempt errored and the store deliberately stops re-running a broken
+   * path). A status value outside {@link MentionStatus} also counts as handled,
+   * so a legacy or hand-edited file can never trigger a duplicate reply.
+   */
   async isHandled(uri: string): Promise<boolean> {
     const store = await readStore(this.storePath);
     return store.entries.some(
-      (e) => e.uri === uri && e.status !== "pending"
+      (e) => e.uri === uri && isTerminalStatus(e.status)
     );
   }
 
@@ -196,7 +249,9 @@ export class MentionStore {
       const store = await readStore(this.storePath);
       const idx = store.entries.findIndex((e) => e.uri === uri);
       if (idx !== -1) {
-        // Prevent terminal-state regression: once replied/failed, never go back to pending
+        // Prevent terminal-state regression: once replied/failed, never go back to pending.
+        // `skipped` is intentionally NOT in this guard — re-opening a skipped mention is
+        // exactly how a changed AI preference lets the mention be reconsidered.
         if (store.entries[idx].status === "replied" || store.entries[idx].status === "failed") {
           return;
         }
@@ -266,6 +321,57 @@ export class MentionStore {
     }
   }
 
+  /**
+   * Mark a URI as deliberately skipped — a policy/opt-out decision (for example
+   * the target author's AI preference denying inference), not a reply and not a
+   * failure.
+   *
+   * Mirrors {@link markFailed}'s argument shape (`uri` plus one optional string)
+   * so a call site can swap one for the other unchanged; the string is persisted
+   * on the entry's `reason` field (never `error`), together with an updated
+   * `timestamp`, so repeated skipping stays observable via {@link getAll}
+   * instead of being silent.
+   *
+   * The resulting `skipped` status is **not** terminal: {@link isHandled} keeps
+   * reporting false for the entry, so the mention is picked up again when the
+   * governing preference changes, and {@link markInProgress} will move the entry
+   * back to `pending`.
+   *
+   * Entries that are already terminal (`replied` or `failed`) are left untouched
+   * — a skip must never un-do a reply that was actually posted, nor mask a real
+   * error.
+   *
+   * @param uri - The Bluesky AT URI of the mentioning post.
+   * @param reason - Optional human-readable explanation for the skip.
+   */
+  async markSkipped(uri: string, reason?: string): Promise<void> {
+    const lf = await acquireLock(this.storePath);
+    try {
+      const store = await readStore(this.storePath);
+      const idx = store.entries.findIndex((e) => e.uri === uri);
+      if (idx !== -1) {
+        const entry = store.entries[idx];
+        if (entry.status === "replied" || entry.status === "failed") {
+          return;
+        }
+        entry.status = "skipped";
+        entry.reason = reason;
+        entry.timestamp = Date.now();
+      } else {
+        store.entries.push({
+          id: uri,
+          uri,
+          status: "skipped",
+          timestamp: Date.now(),
+          reason,
+        });
+      }
+      await writeStore(this.storePath, store);
+    } finally {
+      await releaseLock(lf);
+    }
+  }
+
   /** Get all mentions that are still pending (unhandled). */
   async getPending(): Promise<Array<{ uri: string; timestamp: number }>> {
     const store = await readStore(this.storePath);
@@ -298,7 +404,12 @@ export class MentionStore {
     return store.entries.length;
   }
 
-  /** Get all entries (useful for debugging). */
+  /**
+   * Get all entries (useful for debugging and for status-aware reporting).
+   * Each entry exposes its `status` — including non-terminal `skipped` — plus the
+   * `reason` recorded by {@link markSkipped}, so callers can distinguish a
+   * deliberate skip from a pending or failed attempt.
+   */
   async getAll(): Promise<MentionEntry[]> {
     const store = await readStore(this.storePath);
     return [...store.entries];

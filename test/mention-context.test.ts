@@ -518,8 +518,11 @@ async function testInvalidUriFormatHandling() {
       name: "get-mention-context",
       arguments: {},
     });
-    assert.equal(res.isError, true);
-    assert.match(res.content[0].text, /Invalid post URI format in notification/);
+    // One malformed notification must not abort the whole call: it is skipped and
+    // reported instead of turning the tool result into an error.
+    assert.equal(res.isError, undefined);
+    assert.match(res.content[0].text, /No usable mentions found\. 1 mention\(s\) skipped/);
+    assert.match(res.content[0].text, /invalid post URI format/);
   } finally {
     await close();
   }

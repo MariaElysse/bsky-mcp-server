@@ -6,10 +6,12 @@ import { runTests } from "./test-helpers.js";
  * Covers:
  *  - File creation and format (JSON file with version & entries)
  *  - Atomic writes and data integrity
- *  - isHandled (unhandled, pending, replied, failed)
+ *  - isHandled (unhandled, pending, replied, failed, skipped)
  *  - markInProgress (creates pending entry, updates timestamp)
  *  - markCompleted (updates to replied, stores replyUri)
  *  - markFailed (updates to failed, stores error message)
+ *  - markSkipped (non-terminal skipped status + reason; skipped is NOT handled)
+ *  - status transitions across a skipped entry, and legacy stores without it
  *  - getPending (retrieves pending entries sorted oldest first)
  *  - cleanup (removes entries older than maxAgeMs, default 24h)
  *  - size, getAll, clear, getPath helper methods
@@ -515,6 +517,304 @@ async function testDoubleMarkInProgressPreservesSingleEntry() {
 }
 
 // ---------------------------------------------------------------------------
+// `skipped` status — non-terminal opt-outs (AI-preference denials, etc.)
+// ---------------------------------------------------------------------------
+
+async function testMarkSkippedIsNotHandled() {
+  const storePath = getTempStorePath("skipped-not-handled");
+  const store = new MentionStore(storePath);
+  const uri = "at://did:plc:alice/app.bsky.feed.post/skip1";
+
+  await store.markInProgress(uri);
+  await store.markSkipped(uri, "Target author has opted out of AI preferences");
+
+  assert.equal(await store.size(), 1);
+  assert.equal(
+    await store.isHandled(uri),
+    false,
+    "a skipped mention must stay re-considerable, so it is not handled"
+  );
+
+  const pending = await store.getPending();
+  assert.equal(pending.length, 0, "skipped entries are not pending either");
+
+  const all = await store.getAll();
+  assert.equal(all[0].status, "skipped");
+  assert.equal(all[0].reason, "Target author has opted out of AI preferences");
+  assert.equal(all[0].error, undefined, "a skip is not recorded as an error");
+  assert.ok(typeof all[0].timestamp === "number", "skip records when it happened");
+}
+
+async function testMarkSkippedDirectly() {
+  const storePath = getTempStorePath("skipped-direct");
+  const store = new MentionStore(storePath);
+  const uri = "at://did:plc:alice/app.bsky.feed.post/skip-direct";
+
+  await store.markSkipped(uri, "AI preference denied");
+  assert.equal(await store.size(), 1);
+  assert.equal(await store.isHandled(uri), false);
+
+  const all = await store.getAll();
+  assert.equal(all[0].id, uri);
+  assert.equal(all[0].status, "skipped");
+  assert.equal(all[0].reason, "AI preference denied");
+}
+
+async function testMarkSkippedWithoutReason() {
+  const storePath = getTempStorePath("skipped-no-reason");
+  const store = new MentionStore(storePath);
+  await store.markSkipped("at://direct-skip");
+
+  assert.equal(await store.isHandled("at://direct-skip"), false);
+  const all = await store.getAll();
+  assert.equal(all[0].status, "skipped");
+  assert.equal(all[0].reason, undefined);
+}
+
+async function testSkippedDoesNotChangeTerminalStatuses() {
+  const storePath = getTempStorePath("terminal-unchanged");
+  const store = new MentionStore(storePath);
+
+  await store.markCompleted("at://still-replied", "at://reply-1");
+  await store.markFailed("at://still-failed", "Rate limit exceeded");
+
+  assert.equal(await store.isHandled("at://still-replied"), true, "replied stays terminal");
+  assert.equal(await store.isHandled("at://still-failed"), true, "failed stays terminal");
+}
+
+async function testMarkSkippedThenMarkCompletedTransitions() {
+  const storePath = getTempStorePath("skipped-to-replied");
+  const store = new MentionStore(storePath);
+  const uri = "at://did:plc:alice/app.bsky.feed.post/skip-then-reply";
+  const replyUri = "at://did:plc:bot/app.bsky.feed.post/reply-after-skip";
+
+  // Skipped under the old preference, reconsidered, then replied after the change.
+  await store.markSkipped(uri, "AI preference denied");
+  assert.equal(await store.isHandled(uri), false);
+
+  await store.markCompleted(uri, replyUri);
+  assert.equal(await store.size(), 1, "transition must not create a second entry");
+
+  const all = await store.getAll();
+  assert.equal(all[0].status, "replied");
+  assert.equal(all[0].replyUri, replyUri);
+  assert.equal(await store.isHandled(uri), true, "replying makes the entry terminal again");
+}
+
+async function testMarkSkippedThenMarkInProgressReopens() {
+  const storePath = getTempStorePath("skipped-to-pending");
+  const store = new MentionStore(storePath);
+  const uri = "at://did:plc:alice/app.bsky.feed.post/skip-reopen";
+
+  await store.markSkipped(uri, "AI preference denied");
+  await store.markInProgress(uri);
+
+  const all = await store.getAll();
+  assert.equal(all.length, 1);
+  assert.equal(all[0].status, "pending", "skipped must be re-openable via markInProgress");
+
+  const pending = await store.getPending();
+  assert.deepEqual(pending.map((p) => p.uri), [uri]);
+  assert.equal(await store.isHandled(uri), false);
+}
+
+async function testMarkSkippedDoesNotDowngradeTerminalEntries() {
+  const storePath = getTempStorePath("skip-no-downgrade");
+  const store = new MentionStore(storePath);
+  const repliedUri = "at://did:plc:alice/app.bsky.feed.post/replied-first";
+  const failedUri = "at://did:plc:alice/app.bsky.feed.post/failed-first";
+
+  await store.markCompleted(repliedUri, "at://reply-existing");
+  await store.markFailed(failedUri, "Post not found or inaccessible");
+
+  await store.markSkipped(repliedUri, "AI preference denied");
+  await store.markSkipped(failedUri, "AI preference denied");
+
+  const all = await store.getAll();
+  const replied = all.find((e) => e.uri === repliedUri)!;
+  const failed = all.find((e) => e.uri === failedUri)!;
+
+  assert.equal(replied.status, "replied", "a posted reply is never un-done by a skip");
+  assert.equal(replied.reason, undefined);
+  assert.equal(await store.isHandled(repliedUri), true);
+
+  assert.equal(failed.status, "failed", "a real error is never masked by a skip");
+  assert.equal(failed.error, "Post not found or inaccessible");
+  assert.equal(failed.reason, undefined);
+  assert.equal(await store.isHandled(failedUri), true);
+}
+
+async function testRepeatedMarkSkippedUpdatesReasonAndTimestamp() {
+  const storePath = getTempStorePath("skip-repeat");
+  const store = new MentionStore(storePath);
+  const uri = "at://did:plc:alice/app.bsky.feed.post/skip-repeat";
+
+  await store.markSkipped(uri, "AI preference denied");
+  const first = (await store.getAll())[0];
+  await new Promise((r) => setTimeout(r, 15));
+  await store.markSkipped(uri, "AI preference denied (still opted out)");
+
+  assert.equal(await store.size(), 1, "repeated skipping keeps a single entry");
+  const second = (await store.getAll())[0];
+  assert.equal(second.status, "skipped");
+  assert.equal(second.reason, "AI preference denied (still opted out)");
+  assert.ok(second.timestamp > first.timestamp, "repeated skipping is observable over time");
+}
+
+async function testSkippedFileStructure() {
+  const storePath = getTempStorePath("skipped-structure");
+  const store = new MentionStore(storePath);
+  const uri = "at://did:plc:alice/app.bsky.feed.post/skip-json";
+
+  await store.markSkipped(uri, "Target author has opted out of AI preferences");
+  const parsed = JSON.parse(await fs.readFile(storePath, "utf-8"));
+
+  assert.equal(parsed.version, 1, "adding the skipped status does not bump the file version");
+  assert.equal(parsed.entries.length, 1);
+  assert.equal(parsed.entries[0].status, "skipped");
+  assert.equal(parsed.entries[0].reason, "Target author has opted out of AI preferences");
+  assert.equal("error" in parsed.entries[0], false, "no error key is written for a skip");
+}
+
+async function testSkippedEntriesPersistAcrossReload() {
+  const storePath = getTempStorePath("skipped-reload");
+  const store1 = new MentionStore(storePath);
+  const uri = "at://did:plc:alice/app.bsky.feed.post/skip-persist";
+
+  await store1.markSkipped(uri, "AI preference denied");
+
+  // Fresh instance reading the same file: the skip survives, and stays non-terminal.
+  const store2 = new MentionStore(storePath);
+  assert.equal(await store2.size(), 1);
+  assert.equal(await store2.isHandled(uri), false, "skipped stays non-terminal after reload");
+
+  const all = await store2.getAll();
+  assert.equal(all[0].status, "skipped");
+  assert.equal(all[0].reason, "AI preference denied");
+  assert.ok(typeof all[0].timestamp === "number");
+}
+
+async function testLegacyStoreWithoutSkippedLoads() {
+  const storePath = getTempStorePath("legacy-store");
+  const now = Date.now();
+  const pendingUri = "at://did:plc:legacy/app.bsky.feed.post/p";
+  const repliedUri = "at://did:plc:legacy/app.bsky.feed.post/r";
+  const failedUri = "at://did:plc:legacy/app.bsky.feed.post/f";
+
+  // Exactly what the current (pre-`skipped`) code writes: no `reason` field, no `skipped` status.
+  const legacy = {
+    version: 1,
+    entries: [
+      { id: pendingUri, uri: pendingUri, status: "pending", timestamp: now },
+      { id: repliedUri, uri: repliedUri, status: "replied", timestamp: now, replyUri: "at://reply" },
+      { id: failedUri, uri: failedUri, status: "failed", timestamp: now, error: "boom" },
+    ],
+  };
+  await fs.writeFile(storePath, JSON.stringify(legacy, null, 2), "utf-8");
+
+  const store = new MentionStore(storePath);
+  assert.equal(await store.size(), 3);
+  assert.equal(await store.isHandled(pendingUri), false);
+  assert.equal(await store.isHandled(repliedUri), true);
+  assert.equal(await store.isHandled(failedUri), true);
+  assert.deepEqual((await store.getPending()).map((p) => p.uri), [pendingUri]);
+
+  const all = await store.getAll();
+  assert.equal(all[1].status, "replied");
+  assert.equal(all[1].reason, undefined);
+  assert.equal(all[2].error, "boom");
+
+  // A legacy entry can be skipped by the new API without migrating the file first.
+  await store.markSkipped(pendingUri, "AI preference denied");
+  assert.equal(await store.size(), 3);
+  const updated = (await store.getAll())[0];
+  assert.equal(updated.status, "skipped");
+  assert.equal(updated.reason, "AI preference denied");
+  assert.equal(await store.isHandled(pendingUri), false);
+}
+
+async function testUnknownLegacyStatusIsHandled() {
+  const storePath = getTempStorePath("unknown-status");
+  const uri = "at://did:plc:legacy/app.bsky.feed.post/unknown";
+
+  await fs.writeFile(
+    storePath,
+    JSON.stringify(
+      { version: 1, entries: [{ id: uri, uri, status: "awaiting-review", timestamp: Date.now() }] },
+      null,
+      2
+    ),
+    "utf-8"
+  );
+
+  const store = new MentionStore(storePath);
+  assert.equal(await store.size(), 1, "an unrecognised status must not crash the loader");
+  assert.equal(await store.isHandled(uri), true, "unknown statuses fail closed against duplicate replies");
+  assert.deepEqual(await store.getPending(), []);
+}
+
+async function testMixedStatusesIncludingSkipped() {
+  const storePath = getTempStorePath("mixed-skipped");
+  const store = new MentionStore(storePath);
+
+  await store.markInProgress("at://pending1");
+  await store.markCompleted("at://replied1", "at://r1");
+  await store.markFailed("at://failed1", "err1");
+  await store.markSkipped("at://skipped1", "AI preference denied");
+
+  assert.equal(await store.size(), 4);
+  assert.equal(await store.isHandled("at://pending1"), false);
+  assert.equal(await store.isHandled("at://replied1"), true);
+  assert.equal(await store.isHandled("at://failed1"), true);
+  assert.equal(await store.isHandled("at://skipped1"), false);
+
+  const pending = await store.getPending();
+  assert.deepEqual(pending.map((p) => p.uri), ["at://pending1"]);
+
+  const statuses = (await store.getAll()).map((e) => e.status);
+  assert.deepEqual(statuses, ["pending", "replied", "failed", "skipped"]);
+}
+
+async function testCleanupRemovesOldSkipped() {
+  // Retention rules are unchanged; this only documents that skipped entries are
+  // pruned by timestamp like every other status.
+  const storePath = getTempStorePath("cleanup-skipped");
+  const store = new MentionStore(storePath);
+
+  await store.markSkipped("at://old-skipped", "AI preference denied");
+  await store.markSkipped("at://recent-skipped", "AI preference denied");
+
+  const raw = JSON.parse(await fs.readFile(storePath, "utf-8"));
+  raw.entries[0].timestamp = Date.now() - 100000;
+  await fs.writeFile(storePath, JSON.stringify(raw, null, 2), "utf-8");
+
+  const removed = await store.cleanup(50000);
+  assert.equal(removed, 1);
+  assert.equal(await store.size(), 1);
+  assert.equal((await store.getAll())[0].uri, "at://recent-skipped");
+}
+
+async function testConcurrentSkippedWrites() {
+  const storePath = getTempStorePath("concurrent-skipped");
+  const store1 = new MentionStore(storePath);
+  const store2 = new MentionStore(storePath);
+
+  const promises: Promise<void>[] = [];
+  for (let i = 0; i < 10; i++) {
+    const uri = `at://did:plc:user${i}/app.bsky.feed.post/s${i}`;
+    const s = i % 2 === 0 ? store1 : store2;
+    promises.push(s.markSkipped(uri, "AI preference denied"));
+  }
+  await Promise.all(promises);
+
+  assert.equal(await store1.size(), 10);
+  assert.equal(await store2.size(), 10);
+  for (let i = 0; i < 10; i++) {
+    assert.equal(await store1.isHandled(`at://did:plc:user${i}/app.bsky.feed.post/s${i}`), false);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 
@@ -551,6 +851,21 @@ const tests: Array<[string, () => Promise<void>]> = [
   ["testTimestampUpdatedOnMarkCompleted", testTimestampUpdatedOnMarkCompleted],
   ["testTimestampUpdatedOnMarkFailed", testTimestampUpdatedOnMarkFailed],
   ["testDoubleMarkInProgressPreservesSingleEntry", testDoubleMarkInProgressPreservesSingleEntry],
+  ["testMarkSkippedIsNotHandled", testMarkSkippedIsNotHandled],
+  ["testMarkSkippedDirectly", testMarkSkippedDirectly],
+  ["testMarkSkippedWithoutReason", testMarkSkippedWithoutReason],
+  ["testSkippedDoesNotChangeTerminalStatuses", testSkippedDoesNotChangeTerminalStatuses],
+  ["testMarkSkippedThenMarkCompletedTransitions", testMarkSkippedThenMarkCompletedTransitions],
+  ["testMarkSkippedThenMarkInProgressReopens", testMarkSkippedThenMarkInProgressReopens],
+  ["testMarkSkippedDoesNotDowngradeTerminalEntries", testMarkSkippedDoesNotDowngradeTerminalEntries],
+  ["testRepeatedMarkSkippedUpdatesReasonAndTimestamp", testRepeatedMarkSkippedUpdatesReasonAndTimestamp],
+  ["testSkippedFileStructure", testSkippedFileStructure],
+  ["testSkippedEntriesPersistAcrossReload", testSkippedEntriesPersistAcrossReload],
+  ["testLegacyStoreWithoutSkippedLoads", testLegacyStoreWithoutSkippedLoads],
+  ["testUnknownLegacyStatusIsHandled", testUnknownLegacyStatusIsHandled],
+  ["testMixedStatusesIncludingSkipped", testMixedStatusesIncludingSkipped],
+  ["testCleanupRemovesOldSkipped", testCleanupRemovesOldSkipped],
+  ["testConcurrentSkippedWrites", testConcurrentSkippedWrites],
 ];
 
 async function main() {
