@@ -194,4 +194,4 @@ Install and deploy from this repository's `main` (or your own fork of it), not f
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). This fork builds on [lizthegrey/bsky-mcp-server](https://github.com/lizthegrey/bsky-mcp-server); [NOTICE](NOTICE) records the upstream attribution and what this fork changes.

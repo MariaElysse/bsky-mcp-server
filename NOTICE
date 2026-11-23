@@ -1,0 +1,33 @@
+bsky-mcp-server
+Copyright (c) 2025-2026 Maria Elysse
+
+This project is licensed under the MIT License. The full licence text is in
+the LICENSE file at the root of this repository.
+
+Upstream attribution
+--------------------
+
+This repository is a fork of lizthegrey/bsky-mcp-server
+(https://github.com/lizthegrey/bsky-mcp-server). The original project and the
+work contributed to it are credited here: the upstream code, its authors, and
+its contributors are the source of the baseline this fork builds on, and their
+original MIT licence terms are acknowledged.
+
+What this fork changes
+----------------------
+
+Notable areas where this fork differs from upstream (the README's "Differences
+from upstream" section is the long version):
+
+- AI-preference enforcement via `community.lexicon.preference.ai` records,
+  applied by every content-fetching tool, with tombstones preserving order.
+- Mention handling (`get-mention-context`, `run-mention-monitor`,
+  `create-reply`) and a persistent mention-deduplication store.
+- Thread context fetching and formatting for mention conversations.
+- Cursor-based pagination on the post-fetching tools (auto-fetch, cursor and
+  hours modes, capped totals).
+- Self-hosted PDS support (`BLUESKY_SERVICE_URL`, `BSKY_WEB_URL`, and search
+  through a separate unauthenticated agent against `api.bsky.app`).
+- Removal of the upstream remote/OAuth HTTP mode (`src/remote/`, its
+  Dockerfile, deploy artifacts, signing-key script and test); this server is
+  stdio-only.
