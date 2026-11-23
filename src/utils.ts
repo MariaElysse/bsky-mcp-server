@@ -239,8 +239,11 @@ export async function validateUri(
 }
 
 /**
- * Debugs the structure of a post to see where facets are stored
- * This is a temporary function to help with development
+ * Dumps a post's shape (record keys, facet location) to stderr so facet
+ * layout changes in the ATProto API are visible without a debugger.
+ * Writes to stderr, never stdout, because stdout carries MCP traffic.
+ * The only caller is the register-tools suite, which exercises it so the
+ * function cannot rot into something that throws when it is needed.
  */
 export function debugPostStructure(post: any): void {
   console.error('DEBUG POST STRUCTURE:');
