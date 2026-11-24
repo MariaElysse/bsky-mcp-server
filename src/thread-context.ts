@@ -7,7 +7,6 @@ import { Agent } from '@atproto/api';
 import {
   batchCheckAiPreferences,
   filterThreadByAiPreferences as aiPrefFilterThread,
-  getDidsFromThread,
 } from './ai-preferences.js';
 import { formatPostThread, formatPostThreadWithAiPrefs } from './llm-preprocessor.js';
 
@@ -122,7 +121,7 @@ export function formatThreadForReply(
   const participants = extractAllParticipants(threadView);
 
   // Format the full thread using llm-preprocessor conventions
-  let formattedText = '';
+  let formattedText: string;
   try {
     formattedText = formatPostThread(threadView);
   } catch (_err) {

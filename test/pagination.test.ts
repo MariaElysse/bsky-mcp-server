@@ -100,21 +100,21 @@ function createSmartAgent(config: {
   const nextNotif = makePageFetcher('notif', config.notifPages ?? []);
 
   return {
-    getTimeline: async ({ limit, cursor }: { limit: number; cursor?: string }) => ({
+    getTimeline: async (_params: { limit: number; cursor?: string }) => ({
       success: true, data: await nextTimeline(),
     }),
     app: {
       bsky: {
         notification: {
-          listNotifications: async ({ limit, cursor, reasons }: any) => ({
+          listNotifications: async (_params: any) => ({
             success: true, data: await nextNotif(),
           }),
         },
         feed: {
-          getFeed: async ({ limit, cursor }: any) => ({ success: true, data: await nextFeed() }),
-          getListFeed: async ({ limit, cursor }: any) => ({ success: true, data: await nextListFeed() }),
-          getAuthorFeed: async ({ limit, cursor, filter }: any) => ({ success: true, data: await nextAuthorFeed() }),
-          getActorLikes: async ({ limit, cursor }: any) => ({ success: true, data: await nextLikes() }),
+          getFeed: async (_params: any) => ({ success: true, data: await nextFeed() }),
+          getListFeed: async (_params: any) => ({ success: true, data: await nextListFeed() }),
+          getAuthorFeed: async (_params: any) => ({ success: true, data: await nextAuthorFeed() }),
+          getActorLikes: async (_params: any) => ({ success: true, data: await nextLikes() }),
           getFeedGenerator: async () => ({ success: true, data: { view: { displayName: "Test Feed" } } }),
         },
         graph: {

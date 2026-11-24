@@ -303,7 +303,6 @@ async function test_preprocessPosts_tombstone_xml_format() {
 
 async function test_filterThreadByAiPreferences_requested_post_always_shown() {
   // Simulate a thread view where the requested post's author denies AI prefs
-  const deniedRecord = { training: "deny", inference: "deny" };
   const allowedMap = new Map([["did:plc:alice", false]]);
 
   const threadView = {

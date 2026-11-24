@@ -15,7 +15,6 @@
 import { promises as fs, type Stats } from "node:fs";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
-import os from "node:os";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -167,7 +166,6 @@ function lockFilePath(storePath: string): string {
 const processLocks = new Map<string, Promise<void>>();
 
 async function acquireProcessLock(storePath: string): Promise<() => void> {
-  let releaseProcessLock: () => void;
   const currentLock = processLocks.get(storePath) ?? Promise.resolve();
   let resolveNext: () => void;
   const nextLock = new Promise<void>((resolve) => {

@@ -36,20 +36,6 @@ const tc = await import("../src/thread-context.js");
 // Test fixtures — minimal thread view structures mimicking getPostThread output
 // ---------------------------------------------------------------------------
 
-function makePost(authorDid: string, uri: string, text: string = "test post") {
-  return {
-    $type: "app.bsky.feed.defs#threadViewPost",
-    post: {
-      $type: "app.bsky/feed/def#postView",
-      uri: uri,
-      cid: "sha256:" + uri.split("/").pop(),
-      author: { did: authorDid },
-      record: { text: text, createdAt: new Date().toISOString(), reply: null },
-      indexedAt: new Date().toISOString(),
-    },
-  };
-}
-
 function makeThreadView(authorDid: string, uri: string, parent: any = null, replies: any[] = []) {
   return {
     $type: "app.bsky.feed.defs#threadViewPost",

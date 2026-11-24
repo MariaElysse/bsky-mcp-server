@@ -30,7 +30,6 @@ import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { Agent } from "@atproto/api";
 import { registerTools, AgentProvider } from "../src/tools.js";
 import { clearPreferenceCache } from "../src/ai-preferences.js";
 import { MentionStore } from "../src/mention-store.js";
@@ -857,7 +856,7 @@ async function testAutoReplyRequiresOptInEnv() {
         },
       },
     },
-    post: async (record: any) => {
+    post: async (_record: any) => {
       postCalls++;
       return { uri: "at://did:plc:bot/app.bsky.feed.post/gate-reply", cid: "cid_gate_reply" };
     },

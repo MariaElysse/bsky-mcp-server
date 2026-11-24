@@ -310,7 +310,7 @@ export function parseBskyUrl(url: string): { handle: string, rkey: string } | nu
     
     // Match patterns like https://<domain>/profile/<handle>/post/<rkey>
     // Accept any domain — bsky.app, blacksky.community, or any custom frontend.
-    const regex = /https?:\/\/[^\/]+\/profile\/([^\/]+)\/post\/([^\/\?#]+)/;
+    const regex = /https?:\/\/[^/]+\/profile\/([^/]+)\/post\/([^/?#]+)/;
     const match = cleanUrl.match(regex);
     
     if (!match) return null;
@@ -357,7 +357,7 @@ export async function convertBskyUrlToAtUri(url: string, agent: Agent): Promise<
  */
 export function extractFirstUrl(text: string): string | null {
   // URL regex that handles common patterns
-  const urlRegex = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi;
+  const urlRegex = /https?:\/\/[^\s<>"{}|\\^`\]]+/gi;
   const match = text.match(urlRegex);
   return match ? match[0] : null;
 }

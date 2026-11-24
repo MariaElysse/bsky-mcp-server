@@ -25,16 +25,13 @@ import os from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { Agent } from "@atproto/api";
 import { registerTools, AgentProvider } from "../src/tools.js";
 import { clearPreferenceCache } from "../src/ai-preferences.js";
-import { MentionStore, getMentionStore } from "../src/mention-store.js";
+import { getMentionStore } from "../src/mention-store.js";
 import {
   extractAllParticipants,
-  formatThreadForReply,
   isolateBranch,
   formatPermissionSummary,
-  fetchThreadContext,
 } from "../src/thread-context.js";
 
 const TEST_DIR = path.join(
@@ -402,7 +399,7 @@ async function testDeduplicationSkipsHandled() {
           }),
         },
         feed: {
-          getPostThread: async ({ uri }: { uri: string }) => ({
+          getPostThread: async (_params: { uri: string }) => ({
             success: true,
             data: { thread: threadNew },
           }),

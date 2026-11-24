@@ -5,7 +5,6 @@ import type {
   AppBskyEmbedVideo,
   AppBskyEmbedExternal,
   AppBskyEmbedRecord,
-  AppBskyActorDefs,
   AppBskyFeedPost
 } from '@atproto/api';
 import { RichText } from '@atproto/api';
@@ -67,9 +66,9 @@ function padNumber(value: number, length: number): string {
  * An unparseable input still throws `RangeError('Invalid time value')` so the
  * catch below keeps returning the original string.
  *
- * date-fns deliberately stays in package.json (the lockfile and build toolchain
- * for this pass are frozen, so removing the dependency is out of scope), but no
- * code in this repository imports it any more.
+ * date-fns is no longer a dependency of this project — nothing imports it —
+ * but the shape of its output is what the tests pin, so the helpers above keep
+ * reproducing it rather than switching to `toISOString()`.
  */
 function formatDate(dateString: string): string {
   try {
@@ -116,9 +115,11 @@ function xmlAttrs(entries: Array<readonly [string, string]>): string {
 }
 
 /**
- * Determines the post type based on its properties
+ * Determines the post type based on its properties. The repost reason is not a
+ * parameter: reposts are rendered by a dedicated `<repost>` element, and the
+ * remaining types come from the record itself.
  */
-function determinePostType(post: AppBskyFeedDefs.PostView, reason?: AppBskyFeedDefs.ReasonRepost): string[] {
+function determinePostType(post: AppBskyFeedDefs.PostView): string[] {
   const types: string[] = [];
   
   // Base type
@@ -189,7 +190,7 @@ function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
   }
   
   // For non-reposts, continue with normal formatting
-  const types = determinePostType(post, reason as AppBskyFeedDefs.ReasonRepost);
+  const types = determinePostType(post);
   const bskyUrl = createBskyUrl(post.uri, post.author.handle);
   const record = post.record as AppBskyFeedPost.Record;
   const postDate = formatDate(record.createdAt);
@@ -461,7 +462,7 @@ export function preprocessPosts(feedItems: AppBskyFeedDefs.FeedViewPost[]): stri
 
   // Format threads (with their original indices)
   const threadItems: Array<{ item: any; index: number }> = [];
-  threads.forEach((items, rootUri) => {
+  threads.forEach((items) => {
     items.forEach(item => {
       const origIdx = feedItems.indexOf(item);
       if (origIdx >= 0) threadItems.push({ item, index: origIdx });
@@ -473,21 +474,21 @@ export function preprocessPosts(feedItems: AppBskyFeedDefs.FeedViewPost[]): stri
 
   // Add thread posts with their original indices
   threadItems.forEach(({ item, index }) => {
-    let content = formatThread([item], Object.keys(threads).find(uri => threads.get(uri)?.includes(item)) || '');
+    const content = formatThread([item], Object.keys(threads).find(uri => threads.get(uri)?.includes(item)) || '');
     if (content) allEntries.push({ type: 'post', content, orderIndex: index });
   });
 
   // Add standalone posts with their original indices
   standalone.forEach((item, i) => {
     const origIdx = feedItems.indexOf(item);
-    let content = formatPost(item);
+    const content = formatPost(item);
     if (content) allEntries.push({ type: 'post', content, orderIndex: origIdx >= 0 ? origIdx : i });
   });
 
   // Add tombstones at their original positions
   tombstoneIndices.forEach(idx => {
     const tombstone = feedItems[idx];
-    let content = formatTombstone(tombstone);
+    const content = formatTombstone(tombstone);
     if (content) allEntries.push({ type: 'tombstone', content, orderIndex: idx });
   });
 
@@ -989,14 +990,14 @@ export function formatPostThreadWithAiPrefs(
     threadView.isRequestedPost = true;
 
     // Filter each post in the chain by AI preferences
-    const filteredChain不易 = parentChain.map((pv: any) => {
+    const filteredChain = parentChain.map((pv: any) => {
       const isReq = pv === threadView || pv.isRequestedPost;
       const allowThis = isReq ? allowRequestedPost : false;
       return filterThreadByAiPreferences(pv, allowedDids, allowThis);
     });
 
     // Process the filtered chain
-    output += processFilteredThreadViewChain(filteredChain不易, 0);
+    output += processFilteredThreadViewChain(filteredChain, 0);
   } else {
     // No parents, just process the given thread
     threadView.isRequestedPost = true;
@@ -1020,14 +1021,6 @@ export function formatPostThreadWithAiPrefs(
 function processFilteredThreadViewChain(postChain: any[], indentLevel: number): string {
   return renderThreadViewChain(postChain, indentLevel, WALK_AI_PREF_CHAIN);
 }
-
-/**
- * Process a single filtered thread view post and all of its replies.
- */
-function processFilteredThreadViewPost(threadViewPost: any, indentLevel: number): string {
-  return renderThreadViewNode(threadViewPost, indentLevel, WALK_AI_PREF_FLAT, null, false);
-}
-
 
 /**
  * Format a post thread according to our format spec

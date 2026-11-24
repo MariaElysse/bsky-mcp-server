@@ -21,7 +21,7 @@ import {
 } from './utils.js';
 import { preprocessPosts, formatPostThread, formatPostThreadWithAiPrefs, filterThreadByAiPreferences } from "./llm-preprocessor.js";
 import { fetchLinkMetadata, uploadThumbnail } from './link-preview.js';
-import { batchCheckAiPreferences, batchCheckAiPreferenceRecords, filterPostsByAiPreferences, getDidsFromThread, READ_PREFERENCES, type AiPreferencesRecord } from './ai-preferences.js';
+import { batchCheckAiPreferences, batchCheckAiPreferenceRecords, filterPostsByAiPreferences, getDidsFromThread, type AiPreferencesRecord } from './ai-preferences.js';
 import { MentionStore, getMentionStore } from './mention-store.js';
 import { createHardenedFetch } from './atproto-fetch.js';
 import { fetchThreadContext } from './thread-context.js';
@@ -449,15 +449,9 @@ export function registerTools(
           record.facets = rt.facets;
         }
 
-        let replyRef;
         if (replyTo) {
           // Handle reply format
           try {
-            const parts = replyTo.split('/');
-            const did = parts[2];
-            const rkey = parts[parts.length - 1];
-            const collection = parts[parts.length - 2] === 'app.bsky.feed.post' ? 'app.bsky.feed.post' : parts[parts.length - 2];
-
             // Resolve the CID of the post we're replying to
             const cidResponse = await agent.app.bsky.feed.getPostThread({ uri: replyTo });
             if (!cidResponse.success) {
@@ -553,7 +547,7 @@ export function registerTools(
 
         const profile = response.data;
 
-        let profileText = `Profile for ${profile.displayName || handle} (@${profile.handle})
+        const profileText = `Profile for ${profile.displayName || handle} (@${profile.handle})
 DID: ${profile.did}
 ${profile.description ? `Bio: ${profile.description}` : ''}
 Followers: ${profile.followersCount || 0}
@@ -972,12 +966,8 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
       }
 
       try {
-        // First, we need to get the CID of the post
-        const parts = uri.split('/');
-        const repo = parts[2]; // The DID
-        const collection = parts[4]; // Usually app.bsky.feed.post
-        const rkey = parts[5]; // The record key
-
+        // The CID `agent.like()` needs is not part of the URI, so read it back
+        // from the post's thread view.
         const response = await agent.app.bsky.feed.getPostThread({ uri });
 
         if (!response.success || response.data.thread.$type !== 'app.bsky.feed.defs#threadViewPost') {
@@ -1816,8 +1806,8 @@ ${p?.indexedAt ? `Indexed at: ${new Date(p.indexedAt).toLocaleString()}` : ''}
             return mcpErrorResponse(`User not found: ${user}`);
           }
 
-          // Use the display name in the summary if available
-          const displayName = profileResponse.data.displayName || user;
+          // The profile lookup is an existence check: an unknown handle gets
+          // the error response above instead of an empty follower list.
 
           // Now fetch who follows this user with pagination
           const MAX_BATCH_SIZE = 100; // Maximum number of followers per API call

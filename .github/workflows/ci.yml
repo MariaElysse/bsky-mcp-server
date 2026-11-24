@@ -7,6 +7,31 @@ on:
     branches: [main]
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # No `version:` input: pnpm/action-setup reads it from `packageManager` in
+      # package.json, so the pinned version lives in exactly one place.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm run lint
+
   build-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -20,10 +45,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      # Version comes from `packageManager` in package.json (see the lint job).
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
-        with:
-          version: 12.3.4
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -33,9 +57,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      # Lint step omitted: it needs an ESLint config plus eslint devDependencies
-      # and a regenerated pnpm-lock.yaml before it can run in CI.
 
       - name: Build
         run: pnpm run build

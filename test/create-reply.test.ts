@@ -28,7 +28,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerTools, AgentProvider } from "../src/tools.js";
-import { MentionStore, getMentionStore } from "../src/mention-store.js";
+import { getMentionStore } from "../src/mention-store.js";
 
 const TEST_DIR = path.join(
   os.tmpdir(),
@@ -207,7 +207,6 @@ async function testDedupStorePersistence() {
   }
 
   // Second call with same URI — should skip (dedup)
-  const postedBefore = postedRecord ? JSON.parse(JSON.stringify(postedRecord)) : null;
   const h2 = await harness(() => fakeAgent);
   try {
     const res2: any = await h2.client.callTool({
@@ -399,8 +398,6 @@ async function testNotificationDedup() {
   const post = createMockPost("did:plc:alice", "alice.test", "Original post", uri);
   delete (post.record as any).reply;
 
-  let postedRecord: any = null;
-
   const fakeAgent: any = {
     did: "did:plc:bot",
     app: {
@@ -413,8 +410,7 @@ async function testNotificationDedup() {
         },
       },
     },
-    post: async (record: any) => {
-      postedRecord = record;
+    post: async () => {
       return { uri: "at://did:plc:bot/app.bsky.feed.post/reply1" };
     },
   };

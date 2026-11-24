@@ -189,7 +189,6 @@ async function testRefusalCanaryIsRedacted() {
     "Cheeky bio with ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_DEADBEEF1234 embedded.",
     "ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_CAFEBABE on its own line.",
   ];
-  let idx = 0;
   const fakeAgent = {
     app: {
       bsky: {

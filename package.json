@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc && node -e \"require('fs').mkdirSync('build/test', {recursive: true})\"",
+    "lint": "eslint .",
     "start": "node build/src/index.js",
     "dev": "tsc && node build/src/index.js",
     "test": "pnpm run build && node --test --test-concurrency=1 --test-reporter=spec build/test/",
@@ -21,17 +22,18 @@
   ],
   "author": "Brian Ellin",
   "license": "MIT",
-  "packageManager": "pnpm@12.3.4",
+  "packageManager": "pnpm@12.23.0",
   "dependencies": {
     "@atproto/api": "^0.14.9",
     "@modelcontextprotocol/sdk": "^1.7.0",
-    "date-fns": "^4.1.0",
     "dotenv": "^16.4.7",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.13.10",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.8.2"
+    "eslint": "^10.15.0",
+    "typescript": "^5.8.2",
+    "typescript-eslint": "^8.73.0"
   }
 }

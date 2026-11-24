@@ -2,8 +2,9 @@
 // workspace-push — discover local workspaces, map them to remote branches on
 // 'origin', and push all changes automatically.
 //
-// Usage:
-//   npx ts-node src/scripts/workspace-push.ts [options] [<workspace-dir> ...]
+// Usage (the script is compiled by `pnpm run build` like everything else;
+// there is no ts-node in this project):
+//   pnpm run build && node build/src/scripts/workspace-push.js [options] [<workspace-dir> ...]
 //
 // Options:
 //   --config <path>       Path to a JSON config file listing workspace paths
@@ -150,6 +151,10 @@ function git(cwd: string, args: string[], opts?: { silent?: boolean }): string {
     return (result.stdout ?? "").trim();
   } catch (err: any) {
     const msg = err.message || String(err);
+    // `new Error(msg, { cause: err })` would keep the chain, but `cause` needs
+    // the ES2022 `ErrorOptions` lib and this project compiles to ES2020, so the
+    // original message is folded in instead.
+    // eslint-disable-next-line preserve-caught-error
     throw new Error(`git ${args[0]} failed: ${msg}`);
   }
 }

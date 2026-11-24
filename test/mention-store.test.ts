@@ -979,7 +979,7 @@ async function testStaleLockDeadPidIsTakenOverQuickly() {
 
   const started = Date.now();
   const notes = captureStoreNotes();
-  let elapsedMs = 0;
+  let elapsedMs: number;
   try {
     await store.markInProgress(uri);
     elapsedMs = Date.now() - started;
