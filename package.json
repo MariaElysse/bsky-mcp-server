@@ -8,9 +8,9 @@
     "build": "tsc && node -e \"require('fs').mkdirSync('build/test', {recursive: true})\"",
     "start": "node build/src/index.js",
     "dev": "tsc && node build/src/index.js",
-    "test": "pnpm run build && node build/test/final-test.js",
-    "test:get-thread": "pnpm run build && node build/test/tools/test-get-post-thread.js",
-    "test:url-converter": "pnpm run build && node build/test/url-converter/test-url-converter.js",
+    "test": "pnpm run build && node --test --test-concurrency=1 --test-reporter=spec build/test/",
+    "test:get-thread": "pnpm run build && node --test --test-reporter=spec build/test/tools/test-get-post-thread.js",
+    "test:url-converter": "pnpm run build && node --test --test-reporter=spec build/test/url-converter/test-url-converter.js",
     "process-posts": "pnpm run build && node build/src/scripts/process-post-examples.js",
     "process-threads": "pnpm run build && node build/src/scripts/process-thread-examples.js"
   },

@@ -1,29 +1,20 @@
+import { test } from "node:test";
+
 export type TestCase = [name: string, run: () => Promise<void> | void];
 
 /**
- * Run a suite using the repository-wide test output format.
+ * Register a suite's cases with Node's built-in test runner.
  *
- * Each test emits exactly one TAP-style result line and every suite emits the
- * same pass/fail totals, whether it succeeds or fails.
+ * `node --test build/test/` loads every compiled file under `build/test/` and
+ * runs the cases registered here. The runner owns per-test reporting, the
+ * summary, and the process exit code, so a throwing case still fails the build
+ * instead of being printed and ignored — which is what the previous
+ * hand-rolled loop did.
  */
 export async function runTests(tests: readonly TestCase[]): Promise<void> {
-  let passed = 0;
-
-  for (const [name, run] of tests) {
-    try {
-      await run();
-      passed += 1;
-      console.log(`ok - ${name}`);
-    } catch (error) {
-      console.error(`not ok - ${name}`);
-      console.error(error);
-    }
-  }
-
-  const failed = tests.length - passed;
-  console.log(`\n${passed} / ${tests.length} test(s) passed`);
-  if (failed > 0) {
-    console.error(`${failed} / ${tests.length} test(s) failed`);
-    process.exitCode = 1;
-  }
+  const started = tests.map(([name, run]) => test(name, run));
+  // Suite files create temporary state above the `runTests()` call and delete
+  // it right below it, so the call must stay pending until the registered
+  // cases have actually finished.
+  await Promise.all(started);
 }
