@@ -228,6 +228,7 @@ When modifying content-fetching tools, ensure they respect AI preferences via `b
 - Thread formatting with parent/child relationships, AI preference filtering with tombstones
 - Supports custom `BSKY_WEB_URL` for non-default Bluesky frontends
 - Six read-heavy list tools (timeline, search, liked, feed, list, user posts) take `detail: "full" | "compact"` — `compact` drops the `Engagement:` line and the `bsky_url` attribute of every post and quoted post and nothing else, so `uri`, structure, embeds and tombstones stay identical. Keep it a feed-path option: thread reads (`get-post-thread`, `get-mention-context`) and `get-notifications` deliberately render full detail. `docs/post-format-spec.md` → "Detail levels" is the contract; `test/post-detail.test.ts` and the compact goldens in `test/llm-preprocessor.test.ts` pin it.
+- `get-follows` already has an unrelated, older `detail` of its own (default `"compact"`, `"full"` adds bios and counts to follow lines). Same word, different payload and a different default — do not unify the two or reuse `DETAIL_PARAM` there; the JSDoc above `DETAIL_PARAM` in `src/tools.ts` says so too.
 
 ## Code Style Conventions
 

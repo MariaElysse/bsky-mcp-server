@@ -121,6 +121,11 @@ render in full — they return one thread or one notification at a time, where p
 save little and cost detail. See [docs/post-format-spec.md](docs/post-format-spec.md),
 section "Detail levels".
 
+One naming caveat: `get-follows` has carried its own `detail` parameter for a while, and it
+means something else — `"compact"` is *its* default, and `"full"` adds bios and counts to
+the follow lines. It controls follow-record verbosity, not post rendering, and it is
+independent of the `detail` described above.
+
 ## Installation
 
 ### Installing Manually

@@ -45,6 +45,11 @@ const ANNOTATE_DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idemp
  * engagement line are a large share of the tokens per post, and neither is
  * something a summarizing caller acts on — `uri` is the argument every other
  * tool takes. One schema instance so the wording cannot drift between tools.
+ *
+ * `get-follows` has an older, unrelated `detail` of its own (default
+ * `"compact"`, and it switches follow-record verbosity, not post rendering).
+ * Do not merge the two: different payload, different default, and the graph
+ * one is already shipped to clients.
  */
 const DETAIL_PARAM = z.enum(["full", "compact"]).default("full").describe("How much of each post to render. 'full' (default) includes engagement counts and bsky_url. 'compact' omits both and keeps uri, type, author, timestamps, content and embeds — post structure, thread grouping and hidden-post markers are identical either way.");
 

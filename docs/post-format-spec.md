@@ -276,6 +276,12 @@ Thread rendering (`formatPostThread`, `formatPostThreadWithAiPrefs`, and therefo
 parameter: they return one thread or one notification per call, where the pruning would
 save little and cost detail.
 
+This section is about post rendering only. `get-follows` carries a separate, older `detail`
+parameter of its own — `"compact"` is *its* default and `"full"` adds bios and counts to the
+follow lines — which switches the verbosity of follow records, not of posts. The two knobs
+are independent: neither one changes the other's default, and neither one should be renamed
+onto the other.
+
 ### Hierarchical Structure
 - Replies can be nested in `<replies>` tags under their parent post
 - The `parent_uri` attribute provides explicit relationship information by referencing the URI of the parent post
