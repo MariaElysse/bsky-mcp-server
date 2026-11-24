@@ -18,8 +18,9 @@ import {
   mcpErrorResponse,
   mcpSuccessResponse,
   parsePostUri,
+  type DetailLevel,
 } from './utils.js';
-import { preprocessPosts, formatPostThread, formatPostThreadWithAiPrefs, filterThreadByAiPreferences, type PostDetail } from "./llm-preprocessor.js";
+import { preprocessPosts, formatPostThread, formatPostThreadWithAiPrefs, filterThreadByAiPreferences } from "./llm-preprocessor.js";
 import { fetchLinkMetadata, uploadThumbnail } from './link-preview.js';
 import { batchCheckAiPreferences, batchCheckAiPreferenceRecords, filterPostsByAiPreferences, getDidsFromThread, type AiPreferencesRecord } from './ai-preferences.js';
 import { MentionStore, getMentionStore } from './mention-store.js';
@@ -41,17 +42,25 @@ const ANNOTATE_WRITE_IDEMPOTENT = { readOnlyHint: false, destructiveHint: false,
 const ANNOTATE_DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true } as const;
 
 /**
- * Shared `detail` parameter for the post-list tools. `bsky_url` and the
- * engagement line are a large share of the tokens per post, and neither is
- * something a summarizing caller acts on — `uri` is the argument every other
- * tool takes. One schema instance so the wording cannot drift between tools.
+ * One `detail` parameter for every tool that can render at two levels, built
+ * by this factory so the accepted values, their order, and the default cannot
+ * drift between tools: `"full"` (the default) or `"compact"`, everywhere.
+ * What each level leaves out is per payload, so the description is passed in —
+ * the same way the cursor-signal wording is per tool.
  *
- * `get-follows` has an older, unrelated `detail` of its own (default
- * `"compact"`, and it switches follow-record verbosity, not post rendering).
- * Do not merge the two: different payload, different default, and the graph
- * one is already shipped to clients.
+ * For posts, `bsky_url` and the engagement line are a large share of the
+ * tokens per post, and neither is something a summarizing caller acts on —
+ * `uri` is the argument every other tool takes. For follows it is the bios
+ * and counts that cost the most, which is why the follow description points
+ * at `compact` for large lists.
  */
-const DETAIL_PARAM = z.enum(["full", "compact"]).default("full").describe("How much of each post to render. 'full' (default) includes engagement counts and bsky_url. 'compact' omits both and keeps uri, type, author, timestamps, content and embeds — post structure, thread grouping and hidden-post markers are identical either way.");
+const detailParam = (description: string) =>
+  z.enum(["full", "compact"]).default("full").describe(description);
+
+const DETAIL_PARAM = detailParam("How much of each post to render. 'full' (default) includes engagement counts and bsky_url. 'compact' omits both and keeps uri, type, author, timestamps, content and embeds — post structure, thread grouping and hidden-post markers are identical either way.");
+
+/** Same levels as the post tools; bios and counts are what `compact` drops. */
+const FOLLOW_DETAIL_PARAM = detailParam("How much of each follow to render. 'full' (default) returns a block per user with handle, display name, DID, bio and counts. 'compact' returns one line per follow — handle, display name, DID and, for your own follows, the follow record URI — roughly 80 bytes per entry, which is what a large list wants; at large limits the full payload can exceed what some clients will render.");
 
 /**
  * Filter posts by the current user's AI preferences.
@@ -79,7 +88,7 @@ async function filterPostsByAiPrefs(
   agent: any,
   posts: any[],
   entityType: string = 'posts',
-  detail: PostDetail = 'full'
+  detail: DetailLevel = 'full'
 ): Promise<{ text: string; count: number }> {
   // Collect unique DIDs from post authors (skip tombstones)
   const didSet = new Set<string>();
@@ -1663,12 +1672,12 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
   server.tool(
     "get-follows",
-    "Get one page of users that a person follows. For the authenticated user's own follows, reads records directly from their PDS (fast when colocated, surfaces the follow record URI needed for unfollow-user, and preserves deactivated/takedown follows that the AppView filters out); otherwise uses the AppView graph.getFollows endpoint. Returns a cursor that should be passed back in to fetch the next page.",
+    "Get one page of users that a person follows. For the authenticated user's own follows, reads records directly from their PDS (fast when colocated, surfaces the follow record URI needed for unfollow-user, and preserves deactivated/takedown follows that the AppView filters out); otherwise uses the AppView graph.getFollows endpoint. Returns a cursor that should be passed back in to fetch the next page. Set `detail='compact'` to render one line per follow instead of a block, which is materially cheaper on large lists.",
     {
       user: z.string().describe("The handle or DID of the user (e.g., alice.bsky.social)"),
       limit: z.number().min(1).max(500).default(100).describe("Maximum follows to return in this response (1-500). The tool loops the underlying PDS/AppView pagination (100/page) internally to fulfill larger requests. Raise this when you intend to dump the result to a file; keep it small when the output is meant to stay in the model's context."),
       cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call."),
-      detail: z.enum(["compact", "full"]).default("compact").describe("Output verbosity. 'compact' (default) returns one line per follow with handle, display name, and DID — ~80 bytes per entry. 'full' additionally includes bio and counts; note that at large limits the payload can exceed what some Claude clients will render."),
+      detail: FOLLOW_DETAIL_PARAM,
     },
     ANNOTATE_READ,
     async ({ user, limit, cursor, detail }) => {
@@ -1796,7 +1805,13 @@ ${p?.indexedAt ? `Indexed at: ${new Date(p.indexedAt).toLocaleString()}` : ''}
         }).join(detail === "compact" ? "\n" : "\n\n");
 
         const source = isSelf ? "PDS-direct" : "AppView";
-        const uriHint = isSelf ? " The bracketed at:// URI on each line is the follow record; pass it to unfollow-user as followUri to remove that follow without re-resolving the DID." : "";
+        // Same follow record either way; only where the caller reads it from
+        // depends on the detail level, so the hint follows the rendering.
+        const uriHint = isSelf
+          ? (detail === "compact"
+              ? " The bracketed at:// URI on each line is the follow record; pass it to unfollow-user as followUri to remove that follow without re-resolving the DID."
+              : " The Follow Record URI of each entry is the follow record; pass it to unfollow-user as followUri to remove that follow without re-resolving the DID.")
+          : "";
         const summaryText = `Retrieved ${follows.length} users that @${user} follows (via ${source}).${uriHint}${nextCursor ? ` More pages available — pass cursor="${nextCursor}" to continue.` : ""}`;
 
         return mcpSuccessResponse(`${summaryText}\n\n${formattedFollows}`);

@@ -36,15 +36,15 @@ Threads are represented hierarchically with nested <replies> elements:
 <post type="standalone" uri="..."> <!-- Root post -->
   <content>...</content>
   <replies>
-    <post type="reply" uri="..." reply_to="parent_uri"> <!-- First-level reply -->
+    <post type="reply" uri="..." reply_to="<parent uri>"> <!-- First-level reply -->
       <content>...</content>
       <replies>
-        <post type="reply" uri="..."> <!-- Second-level reply -->
+        <post type="reply" uri="..." reply_to="<this post's uri>"> <!-- Second-level reply -->
           <content>...</content>
         </post>
       </replies>
     </post>
-    <post type="reply" uri="..."> <!-- Another first-level reply -->
+    <post type="reply" uri="..." reply_to="<parent uri>"> <!-- Another first-level reply -->
       <content>...</content>
     </post>
   </replies>
@@ -53,10 +53,18 @@ Threads are represented hierarchically with nested <replies> elements:
 
 Key elements for thread representation:
 - The root post is placed at the top level
-- Each `<post>` with replies contains a `<replies>` section
-- Each reply includes a `<reply_to>` element with the URI of its parent
+- Each `<post>` with replies contains a `<replies>` section, nested inside that post's own closing `</post>` tag
+- Each reply carries a `reply_to` attribute holding the URI of the post it responds to, and `type="reply"`
 - Nesting directly represents the conversation structure
 - Indentation in the XML visually clarifies the thread hierarchy
+
+A feed page is a slice of a conversation, not a thread: posts arrive newest-first
+and most replies' parents are not on the same page. Grouping therefore keys on
+**parent presence, never on the thread root** — a reply is nested only if the post
+it responds to is in the same page, and is otherwise rendered at top level in page
+order, still `type="reply"` with its `reply_to` pointing outside the page. Nothing
+a page returns is ever dropped. `<excluded_post>` markers (AI preferences) always
+stay at top level at their own position; they never nest inside a thread.
 
 ## Complete Specification Example
 
@@ -77,7 +85,7 @@ Key elements for thread representation:
     Engagement: 331 likes, 155 reposts, 19 replies, 10 quotes
     
     <replies>
-      <post type="reply" parent_uri="at://did:plc:twjze4qqf6fgxz33ct52wlnl/app.bsky.feed.post/3llwjm7dgkc2o" uri="at://did:plc:twjze4qqf6fgxz33ct52wlnl/app.bsky.feed.post/3llwkeghjyk2o" bsky_url="https://bsky.app/profile/volts.wtf/post/3llwkeghjyk2o" author_name="David Roberts" author_handle="volts.wtf" posted_at="4/3/2025, 6:38 PM">
+      <post type="reply" uri="at://did:plc:twjze4qqf6fgxz33ct52wlnl/app.bsky.feed.post/3llwkeghjyk2o" bsky_url="https://bsky.app/profile/volts.wtf/post/3llwkeghjyk2o" author_name="David Roberts" author_handle="volts.wtf" posted_at="4/3/2025, 6:38 PM" reply_to="at://did:plc:twjze4qqf6fgxz33ct52wlnl/app.bsky.feed.post/3llwjm7dgkc2o">
         <content>
           Meanwhile: "The damage climate change will inflict on the world's economy is likely to have been massively underestimated, according to new research by my colleagues and I which accounts for the full global reach of extreme weather and its aftermath."
         </content>
@@ -91,7 +99,7 @@ Key elements for thread representation:
         Engagement: 52 likes, 12 reposts, 2 replies, 1 quote
         
         <replies>
-          <post type="reply" parent_uri="at://did:plc:twjze4qqf6fgxz33ct52wlnl/app.bsky.feed.post/3llwkeghjyk2o" uri="at://did:plc:twjze4qqf6fgxz33ct52wlnl/app.bsky.feed.post/3llwkkfiias2o" bsky_url="https://bsky.app/profile/volts.wtf/post/3llwkkfiias2o" author_name="David Roberts" author_handle="volts.wtf" posted_at="4/3/2025, 6:42 PM">
+          <post type="reply" uri="at://did:plc:twjze4qqf6fgxz33ct52wlnl/app.bsky.feed.post/3llwkkfiias2o" bsky_url="https://bsky.app/profile/volts.wtf/post/3llwkkfiias2o" author_name="David Roberts" author_handle="volts.wtf" posted_at="4/3/2025, 6:42 PM" reply_to="at://did:plc:twjze4qqf6fgxz33ct52wlnl/app.bsky.feed.post/3llwkeghjyk2o">
             <content>
               By the way, these links came to me via @billmckibben.bsky.social's excellent newsletter, to which I assume you are all already subscribed.
             </content>
@@ -248,20 +256,26 @@ Embeds are contained in `<embed>` tags with a type attribute:
 
 ### Detail Levels: `full` vs `compact`
 
-The feed entry points (`preprocessPosts`, `formatFeed`, `preprocessPost`) accept an options
-object with a `detail` field, and the six read-heavy list tools expose it as a `detail`
-parameter (`get-timeline-posts`, `search-posts`, `get-liked-posts`, `get-feed-posts`,
-`get-list-posts`, `get-user-posts`). It selects how much of each post is rendered; it is
-not a different format.
+One vocabulary, one declaration: every `detail` parameter in `src/tools.ts` is built by the
+same `detailParam` factory from the `DetailLevel` type in `src/utils.ts`, so the values,
+their order and the default cannot drift between tools. The values are `"full"` and
+`"compact"`, and **`"full"` is the default everywhere**. `detail` selects how much of each
+entry is rendered; it is not a different format. What each level omits is a property of the
+payload, and each tool's own description states it.
+
+For the post lists — the feed entry points (`preprocessPosts`, `formatFeed`,
+`preprocessPost`) accept an options object with a `detail` field, and six read-heavy list
+tools expose it as a parameter (`get-timeline-posts`, `search-posts`, `get-liked-posts`,
+`get-feed-posts`, `get-list-posts`, `get-user-posts`):
 
 - **`full`** (default) — the whole format above, including the `bsky_url` attribute and the
-  `engagement` line of every post, repost and quoted post.
+  `Engagement:` line of every post, repost and quoted post.
 - **`compact`** — the same walk with exactly two things removed from every post and every
   `<quoted_post>`: the `bsky_url` attribute and the `Engagement:` line (and the blank line
   that separated the content from it).
 
 Everything else is byte-identical between the two levels: the `<posts>` container, `uri`,
-`type`, `author_name`/`author_handle`, `posted_at`/`reposted_at`, `reply_to`, `parent_uri`,
+`type`, `author_name`/`author_handle`, `posted_at`/`reposted_at`, `reply_to`,
 `<content>`, every `<embed>` variant, `<repost>` nesting, `<quoted_post>` nesting, the
 thread grouping, and `<excluded_post>` tombstones (which never carried engagement or a web
 URL in the first place, so they render the same either way). `uri` is kept on purpose in
@@ -276,15 +290,19 @@ Thread rendering (`formatPostThread`, `formatPostThreadWithAiPrefs`, and therefo
 parameter: they return one thread or one notification per call, where the pruning would
 save little and cost detail.
 
-This section is about post rendering only. `get-follows` carries a separate, older `detail`
-parameter of its own — `"compact"` is *its* default and `"full"` adds bios and counts to the
-follow lines — which switches the verbosity of follow records, not of posts. The two knobs
-are independent: neither one changes the other's default, and neither one should be renamed
-onto the other.
+`get-follows` takes the same parameter with the same default and defines the two levels for
+its own payload, which is a list of users rather than posts: `full` (default) renders one
+block per follow — display name, handle, DID, the follow record URI, bio, and
+follower/following/post counts — while `compact` renders one line per follow (handle,
+display name, DID and, on the authenticated user's own follows, the bracketed follow record
+URI), roughly 80 bytes per entry, which is what a list of thousands wants. That tool used to
+default to `"compact"`; unifying the vocabulary moved it to `"full"`, so a caller who wants
+the cheap form asks for it.
 
 ### Hierarchical Structure
-- Replies can be nested in `<replies>` tags under their parent post
-- The `parent_uri` attribute provides explicit relationship information by referencing the URI of the parent post
+- Replies nest in a `<replies>` section, inside the closing `</post>` tag of the post they respond to
+- The `reply_to` attribute states the relationship explicitly whether or not the parent is in the same page, so the link survives a sparse feed page
+- Replies to a reposted post nest inside the reposted post, and therefore inside `<repost>`
 
 ## Implementation Notes
 
@@ -293,7 +311,7 @@ onto the other.
 3. Post URIs are used as primary identifiers for posts and references
 4. Author information is provided as attributes on each post element
 5. Content is explicitly wrapped in `<content>` tags for better clarity
-6. Posts are grouped in a simple container without complex thread relationships
+6. A `<posts>` page nests replies under the parents present in that page; a reply whose parent is not in the page stays at top level in page order, carrying `reply_to`, so no post in a page is ever dropped
 7. All elements maintain clear, consistent formatting for better LLM comprehension
 8. Reposts use a dedicated `<repost>` container that wraps the original post structure
 9. Timestamps are included as attributes on post elements rather than in the text content

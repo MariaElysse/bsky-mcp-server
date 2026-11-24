@@ -70,6 +70,17 @@ export interface McpErrorResponse {
   [key: string]: unknown;
 }
 
+/**
+ * The one verbosity vocabulary the server exposes to clients: `"full"` (the
+ * default everywhere) or `"compact"`. Every `detail` parameter in `tools.ts`
+ * is built from this type, so a client can pass the same value to any
+ * detail-aware tool and get the same level — what each level leaves out is
+ * per payload (posts drop engagement and `bsky_url`; follows drop bios and
+ * counts) and is stated in the tool's own parameter description, the same way
+ * the cursor wording is per tool.
+ */
+export type DetailLevel = "full" | "compact";
+
 export function mcpLog(message: string): void {
   if (process.env.LOG_RESPONSES === 'true') {
     // See https://modelcontextprotocol.io/docs/tools/debugging - we should use the server.sendLoggingMessage method, but it is not working for some reason

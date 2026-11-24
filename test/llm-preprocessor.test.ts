@@ -85,7 +85,7 @@ function tvp(o: any = {}): any {
 }
 
 function feedItem(o: any = {}): any {
-  return {
+  const item: any = {
     post: postView({
       uri: o.uri ?? uriOf(ALICE, "feed1"),
       author: o.author ?? { did: ALICE, handle: "alice.test", displayName: "Alice A." },
@@ -93,9 +93,31 @@ function feedItem(o: any = {}): any {
       createdAt: o.createdAt,
       indexedAt: o.indexedAt,
       likeCount: o.likeCount,
+      repostCount: o.repostCount,
+      replyCount: o.replyCount,
+      quoteCount: o.quoteCount,
+      // The record carries the strong refs, and it is `record.reply` that makes
+      // the post type read as "reply" at all.
+      reply: o.replyTo
+        ? { parent: { uri: o.replyTo }, root: { uri: o.replyRoot ?? o.replyTo } }
+        : undefined,
     }),
     reason: o.reason,
   };
+  // The feed item's own `reply` is the resolved view of the same posts; it is
+  // what `reply_to` and the thread grouping read.
+  if (o.replyTo) {
+    item.reply = {
+      parent: postRef(o.replyTo),
+      root: postRef(o.replyRoot ?? o.replyTo),
+    };
+  }
+  return item;
+}
+
+/** The resolved-postView shape the feed puts in `FeedViewPost.reply`. */
+function postRef(uri: string): any {
+  return { $type: "app.bsky.feed.defs#postView", uri };
 }
 
 function tombstone(o: any = {}): any {
@@ -815,6 +837,390 @@ export const CASES: Case[] = [
       "    Engagement: undefined likes, undefined reposts, undefined replies",
       "  </post>",
       "</posts>",
+    ],
+  },
+
+  // ---------------------------------------------------------------------------
+  // Thread nesting in the feed path. A reply is grouped under the post it
+  // responds to only when that post is in the same page, and everything else
+  // renders at top level with `reply_to`. docs/post-format-spec.md ("Thread
+  // Representation", "Complete Specification Example") is the contract for the
+  // nested shape; these goldens are what the code puts on the wire.
+  // ---------------------------------------------------------------------------
+  {
+    name: "feed nesting: a reply and its reply nest inside the post they respond to",
+    run: (m) =>
+      m.preprocessPosts([
+        feedItem({ uri: uriOf(ALICE, "t1"), text: "root", likeCount: 1, repostCount: 2, replyCount: 1 }),
+        feedItem({
+          uri: uriOf(BOB, "t1a"),
+          text: "first reply",
+          author: { did: BOB, handle: "bob.test", displayName: "Bob B." },
+          replyTo: uriOf(ALICE, "t1"),
+          likeCount: 3,
+          repostCount: 0,
+          replyCount: 1,
+        }),
+        feedItem({
+          uri: uriOf(CAROL, "t1a1"),
+          text: "grandchild reply",
+          author: { did: CAROL, handle: "carol.test", displayName: "Carol C." },
+          replyTo: uriOf(BOB, "t1a"),
+          replyRoot: uriOf(ALICE, "t1"),
+          likeCount: 0,
+          repostCount: 0,
+          replyCount: 0,
+        }),
+      ]),
+    expected: [
+      "<posts>",
+      "  <post type=\"standalone\" uri=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t1\" bsky_url=\"https://bsky.app/profile/alice.test/post/t1\" author_name=\"Alice A.\" author_handle=\"alice.test\" posted_at=\"2021-08-04 13:30:00\">",
+      "    <content>",
+      "      root",
+      "    </content>",
+      "    ",
+      "    Engagement: 1 likes, 2 reposts, 1 replies",
+      "",
+      "    <replies>",
+      "      <post type=\"reply\" uri=\"at://did:plc:dddd4444eeee5555ffff6666/app.bsky.feed.post/t1a\" bsky_url=\"https://bsky.app/profile/bob.test/post/t1a\" author_name=\"Bob B.\" author_handle=\"bob.test\" posted_at=\"2021-08-04 13:30:00\" reply_to=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t1\">",
+      "        <content>",
+      "          first reply",
+      "        </content>",
+      "",
+      "        Engagement: 3 likes, 0 reposts, 1 replies",
+      "",
+      "        <replies>",
+      "          <post type=\"reply\" uri=\"at://did:plc:gggg7777hhhh8888iiii9999/app.bsky.feed.post/t1a1\" bsky_url=\"https://bsky.app/profile/carol.test/post/t1a1\" author_name=\"Carol C.\" author_handle=\"carol.test\" posted_at=\"2021-08-04 13:30:00\" reply_to=\"at://did:plc:dddd4444eeee5555ffff6666/app.bsky.feed.post/t1a\">",
+      "            <content>",
+      "              grandchild reply",
+      "            </content>",
+      "",
+      "            Engagement: 0 likes, 0 reposts, 0 replies",
+      "          </post>",
+      "        </replies>",
+      "      </post>",
+      "    </replies>",
+      "  </post>",
+      "</posts>",
+    ],
+  },
+  {
+    name: "feed nesting: a reply whose parent is not in the page renders at top level with reply_to",
+    run: (m) =>
+      m.preprocessPosts([
+        feedItem({ uri: uriOf(ALICE, "t2"), text: "root", likeCount: 1, repostCount: 0, replyCount: 0 }),
+        feedItem({
+          uri: uriOf(BOB, "t2a"),
+          text: "reply to an earlier post",
+          author: { did: BOB, handle: "bob.test", displayName: "Bob B." },
+          replyTo: uriOf(ALICE, "older"),
+          replyRoot: uriOf(ALICE, "older"),
+          likeCount: 0,
+          repostCount: 0,
+          replyCount: 0,
+        }),
+      ]),
+    expected: [
+      "<posts>",
+      "  <post type=\"standalone\" uri=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t2\" bsky_url=\"https://bsky.app/profile/alice.test/post/t2\" author_name=\"Alice A.\" author_handle=\"alice.test\" posted_at=\"2021-08-04 13:30:00\">",
+      "    <content>",
+      "      root",
+      "    </content>",
+      "    ",
+      "    Engagement: 1 likes, 0 reposts, 0 replies",
+      "  </post>",
+      "",
+      "  <post type=\"reply\" uri=\"at://did:plc:dddd4444eeee5555ffff6666/app.bsky.feed.post/t2a\" bsky_url=\"https://bsky.app/profile/bob.test/post/t2a\" author_name=\"Bob B.\" author_handle=\"bob.test\" posted_at=\"2021-08-04 13:30:00\" reply_to=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/older\">",
+      "    <content>",
+      "      reply to an earlier post",
+      "    </content>",
+      "    ",
+      "    Engagement: 0 likes, 0 reposts, 0 replies",
+      "  </post>",
+      "</posts>",
+    ],
+  },
+  {
+    name: "feed nesting: a reply listed before its parent still renders once, nested, at the parent's slot",
+    run: (m) =>
+      m.preprocessPosts([
+        feedItem({
+          uri: uriOf(BOB, "t3a"),
+          text: "reply listed first",
+          author: { did: BOB, handle: "bob.test", displayName: "Bob B." },
+          replyTo: uriOf(ALICE, "t3"),
+          likeCount: 0,
+          repostCount: 0,
+          replyCount: 0,
+        }),
+        feedItem({ uri: uriOf(ALICE, "t3"), text: "root", likeCount: 0, repostCount: 0, replyCount: 0 }),
+      ]),
+    expected: [
+      "<posts>",
+      "  <post type=\"standalone\" uri=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t3\" bsky_url=\"https://bsky.app/profile/alice.test/post/t3\" author_name=\"Alice A.\" author_handle=\"alice.test\" posted_at=\"2021-08-04 13:30:00\">",
+      "    <content>",
+      "      root",
+      "    </content>",
+      "    ",
+      "    Engagement: 0 likes, 0 reposts, 0 replies",
+      "",
+      "    <replies>",
+      "      <post type=\"reply\" uri=\"at://did:plc:dddd4444eeee5555ffff6666/app.bsky.feed.post/t3a\" bsky_url=\"https://bsky.app/profile/bob.test/post/t3a\" author_name=\"Bob B.\" author_handle=\"bob.test\" posted_at=\"2021-08-04 13:30:00\" reply_to=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t3\">",
+      "        <content>",
+      "          reply listed first",
+      "        </content>",
+      "",
+      "        Engagement: 0 likes, 0 reposts, 0 replies",
+      "      </post>",
+      "    </replies>",
+      "  </post>",
+      "</posts>",
+    ],
+  },
+  {
+    name: "feed nesting: replies to a reposted post nest inside the reposted post, inside <repost>",
+    run: (m) =>
+      m.preprocessPosts([
+        feedItem({
+          uri: uriOf(ALICE, "t4"),
+          text: "reposted body",
+          likeCount: 5,
+          repostCount: 1,
+          replyCount: 1,
+          reason: {
+            $type: "app.bsky.feed.defs#reasonRepost",
+            by: { did: BOB, handle: "bob.test", displayName: "Bob B." },
+            indexedAt: "2021-08-05T01:02:03.000Z",
+          },
+        }),
+        feedItem({
+          uri: uriOf(CAROL, "t4a"),
+          text: "reply to the reposted post",
+          author: { did: CAROL, handle: "carol.test", displayName: "Carol C." },
+          replyTo: uriOf(ALICE, "t4"),
+          likeCount: 0,
+          repostCount: 0,
+          replyCount: 0,
+        }),
+      ]),
+    expected: [
+      "<posts>",
+      "  <repost author_name=\"Bob B.\" author_handle=\"bob.test\" reposted_at=\"2021-08-05 01:02:03\">",
+      "    <post type=\"standalone\" uri=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t4\" bsky_url=\"https://bsky.app/profile/alice.test/post/t4\" author_name=\"Alice A.\" author_handle=\"alice.test\" posted_at=\"2021-08-04 13:30:00\">",
+      "      <content>",
+      "        reposted body",
+      "      </content>",
+      "      ",
+      "      Engagement: 5 likes, 1 reposts, 1 replies",
+      "",
+      "      <replies>",
+      "        <post type=\"reply\" uri=\"at://did:plc:gggg7777hhhh8888iiii9999/app.bsky.feed.post/t4a\" bsky_url=\"https://bsky.app/profile/carol.test/post/t4a\" author_name=\"Carol C.\" author_handle=\"carol.test\" posted_at=\"2021-08-04 13:30:00\" reply_to=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t4\">",
+      "          <content>",
+      "            reply to the reposted post",
+      "          </content>",
+      "",
+      "          Engagement: 0 likes, 0 reposts, 0 replies",
+      "        </post>",
+      "      </replies>",
+      "    </post>",
+      "  </repost>",
+      "</posts>",
+    ],
+  },
+  {
+    name: "feed nesting: a self-reply and a two-item cycle terminate and still render every post",
+    run: (m) =>
+      m.preprocessPosts([
+        feedItem({ uri: uriOf(ALICE, "t5"), text: "replies to itself", replyTo: uriOf(ALICE, "t5"), likeCount: 0, repostCount: 0, replyCount: 0 }),
+        feedItem({
+          uri: uriOf(BOB, "t5a"),
+          text: "cycle a",
+          author: { did: BOB, handle: "bob.test", displayName: "Bob B." },
+          replyTo: uriOf(CAROL, "t5b"),
+          replyRoot: uriOf(BOB, "t5a"),
+          likeCount: 0,
+          repostCount: 0,
+          replyCount: 0,
+        }),
+        feedItem({
+          uri: uriOf(CAROL, "t5b"),
+          text: "cycle b",
+          author: { did: CAROL, handle: "carol.test", displayName: "Carol C." },
+          replyTo: uriOf(BOB, "t5a"),
+          replyRoot: uriOf(BOB, "t5a"),
+          likeCount: 0,
+          repostCount: 0,
+          replyCount: 0,
+        }),
+      ]),
+    expected: [
+      "<posts>",
+      "  <post type=\"reply\" uri=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t5\" bsky_url=\"https://bsky.app/profile/alice.test/post/t5\" author_name=\"Alice A.\" author_handle=\"alice.test\" posted_at=\"2021-08-04 13:30:00\" reply_to=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t5\">",
+      "    <content>",
+      "      replies to itself",
+      "    </content>",
+      "    ",
+      "    Engagement: 0 likes, 0 reposts, 0 replies",
+      "  </post>",
+      "",
+      "  <post type=\"reply\" uri=\"at://did:plc:dddd4444eeee5555ffff6666/app.bsky.feed.post/t5a\" bsky_url=\"https://bsky.app/profile/bob.test/post/t5a\" author_name=\"Bob B.\" author_handle=\"bob.test\" posted_at=\"2021-08-04 13:30:00\" reply_to=\"at://did:plc:gggg7777hhhh8888iiii9999/app.bsky.feed.post/t5b\">",
+      "    <content>",
+      "      cycle a",
+      "    </content>",
+      "    ",
+      "    Engagement: 0 likes, 0 reposts, 0 replies",
+      "  </post>",
+      "",
+      "  <post type=\"reply\" uri=\"at://did:plc:gggg7777hhhh8888iiii9999/app.bsky.feed.post/t5b\" bsky_url=\"https://bsky.app/profile/carol.test/post/t5b\" author_name=\"Carol C.\" author_handle=\"carol.test\" posted_at=\"2021-08-04 13:30:00\" reply_to=\"at://did:plc:dddd4444eeee5555ffff6666/app.bsky.feed.post/t5a\">",
+      "    <content>",
+      "      cycle b",
+      "    </content>",
+      "    ",
+      "    Engagement: 0 likes, 0 reposts, 0 replies",
+      "  </post>",
+      "</posts>",
+    ],
+  },
+  {
+    name: "feed nesting: a hidden post never nests, wherever it sits in the page",
+    run: (m) =>
+      m.preprocessPosts([
+        feedItem({ uri: uriOf(ALICE, "t6"), text: "root", likeCount: 0, repostCount: 0, replyCount: 1 }),
+        tombstone({ uri: uriOf(CAROL, "t6h"), handle: "carol.test" }),
+        feedItem({
+          uri: uriOf(BOB, "t6a"),
+          text: "reply under root",
+          author: { did: BOB, handle: "bob.test", displayName: "Bob B." },
+          replyTo: uriOf(ALICE, "t6"),
+          likeCount: 0,
+          repostCount: 0,
+          replyCount: 0,
+        }),
+      ]),
+    expected: [
+      "<posts>",
+      "  <post type=\"standalone\" uri=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t6\" bsky_url=\"https://bsky.app/profile/alice.test/post/t6\" author_name=\"Alice A.\" author_handle=\"alice.test\" posted_at=\"2021-08-04 13:30:00\">",
+      "    <content>",
+      "      root",
+      "    </content>",
+      "    ",
+      "    Engagement: 0 likes, 0 reposts, 1 replies",
+      "",
+      "    <replies>",
+      "      <post type=\"reply\" uri=\"at://did:plc:dddd4444eeee5555ffff6666/app.bsky.feed.post/t6a\" bsky_url=\"https://bsky.app/profile/bob.test/post/t6a\" author_name=\"Bob B.\" author_handle=\"bob.test\" posted_at=\"2021-08-04 13:30:00\" reply_to=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t6\">",
+      "        <content>",
+      "          reply under root",
+      "        </content>",
+      "",
+      "        Engagement: 0 likes, 0 reposts, 0 replies",
+      "      </post>",
+      "    </replies>",
+      "  </post>",
+      "",
+      "<excluded_post reason=\"ai_preferences\" author_handle=\"carol.test\" uri=\"at://did:plc:gggg7777hhhh8888iiii9999/app.bsky.feed.post/t6h\">This post is hidden because the author has disabled AI inference/training in their Bluesky preferences.</excluded_post>",
+      "</posts>",
+    ],
+  },
+  {
+    name: "feed nesting: every post in a mixed page is rendered exactly once",
+    run: (m) => {
+      const items = [
+        feedItem({ uri: uriOf(ALICE, "mix1"), text: "anchor", likeCount: 1, repostCount: 0, replyCount: 2 }),
+        feedItem({ uri: uriOf(BOB, "mix2"), text: "reply in page", author: { did: BOB, handle: "bob.test", displayName: "Bob B." }, replyTo: uriOf(ALICE, "mix1"), likeCount: 0, repostCount: 0, replyCount: 1 }),
+        feedItem({ uri: uriOf(CAROL, "mix3"), text: "reply to that reply", author: { did: CAROL, handle: "carol.test", displayName: "Carol C." }, replyTo: uriOf(BOB, "mix2"), replyRoot: uriOf(ALICE, "mix1"), likeCount: 0, repostCount: 0, replyCount: 0 }),
+        feedItem({ uri: uriOf(BOB, "mix4"), text: "reply outside page", author: { did: BOB, handle: "bob.test", displayName: "Bob B." }, replyTo: uriOf(ALICE, "gone"), replyRoot: uriOf(ALICE, "gone"), likeCount: 0, repostCount: 0, replyCount: 0 }),
+        feedItem({ uri: uriOf(ALICE, "mix5"), text: "reposted", likeCount: 0, repostCount: 0, replyCount: 1, reason: { $type: "app.bsky.feed.defs#reasonRepost", by: { did: BOB, handle: "bob.test" }, indexedAt: "2021-08-05T01:02:03.000Z" } }),
+        feedItem({ uri: uriOf(CAROL, "mix6"), text: "reply to the repost", author: { did: CAROL, handle: "carol.test", displayName: "Carol C." }, replyTo: uriOf(ALICE, "mix5"), likeCount: 0, repostCount: 0, replyCount: 0 }),
+        feedItem({ uri: uriOf(ALICE, "mix7"), text: "self reply", replyTo: uriOf(ALICE, "mix7"), likeCount: 0, repostCount: 0, replyCount: 0 }),
+        tombstone({ uri: uriOf(CAROL, "mix8"), handle: "carol.test" }),
+      ];
+      const out = m.preprocessPosts(items);
+      const uris = items.map((item: any) => (item.post ? item.post.uri : item.originalItem.post.uri));
+      const counts = uris.map((u: string) => `${u.slice(-4)}=${out.split(`uri="${u}"`).length - 1}`);
+      return [
+        counts.join(" "),
+        `replyBlocks=${out.split("<replies>").length - 1}`,
+        `bytes=${out.length}`,
+      ].join(" ");
+    },
+    expected: [
+      "mix1=1 mix2=1 mix3=1 mix4=1 mix5=1 mix6=1 mix7=1 mix8=1 replyBlocks=3 bytes=3321",
+    ],
+  },
+  {
+    name: "feed compact: a nested thread keeps the full tree and drops only url and engagement",
+    run: (m) =>
+      m.preprocessPosts(
+        [
+          feedItem({ uri: uriOf(ALICE, "t7"), text: "root", likeCount: 1, repostCount: 2, replyCount: 1 }),
+          feedItem({
+            uri: uriOf(BOB, "t7a"),
+            text: "first reply",
+            author: { did: BOB, handle: "bob.test", displayName: "Bob B." },
+            replyTo: uriOf(ALICE, "t7"),
+            likeCount: 3,
+            repostCount: 0,
+            replyCount: 0,
+          }),
+        ],
+        { detail: "compact" },
+      ),
+    expected: [
+      "<posts>",
+      "  <post type=\"standalone\" uri=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t7\" author_name=\"Alice A.\" author_handle=\"alice.test\" posted_at=\"2021-08-04 13:30:00\">",
+      "    <content>",
+      "      root",
+      "    </content>",
+      "",
+      "    <replies>",
+      "      <post type=\"reply\" uri=\"at://did:plc:dddd4444eeee5555ffff6666/app.bsky.feed.post/t7a\" author_name=\"Bob B.\" author_handle=\"bob.test\" posted_at=\"2021-08-04 13:30:00\" reply_to=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/t7\">",
+      "        <content>",
+      "          first reply",
+      "        </content>",
+      "      </post>",
+      "    </replies>",
+      "  </post>",
+      "</posts>",
+    ],
+  },
+  {
+    name: "detail: compact is exactly full minus url and engagement at every nesting depth",
+    run: (m) => {
+      const items = [
+        feedItem({ uri: uriOf(ALICE, "p1"), text: "root", likeCount: 1, repostCount: 2, replyCount: 1 }),
+        feedItem({
+          uri: uriOf(BOB, "p1a"),
+          text: "reply",
+          author: { did: BOB, handle: "bob.test", displayName: "Bob B." },
+          replyTo: uriOf(ALICE, "p1"),
+          likeCount: 3,
+          repostCount: 0,
+          replyCount: 1,
+        }),
+        feedItem({
+          uri: uriOf(CAROL, "p1a1"),
+          text: "reply of reply",
+          author: { did: CAROL, handle: "carol.test", displayName: "Carol C." },
+          replyTo: uriOf(BOB, "p1a"),
+          replyRoot: uriOf(ALICE, "p1"),
+          likeCount: 0,
+          repostCount: 0,
+          replyCount: 0,
+        }),
+      ];
+      const full = m.preprocessPosts(items, { detail: "full" });
+      const compact = m.preprocessPosts(items, { detail: "compact" });
+      const strip = (s: string) =>
+        s.replace(/ bsky_url="[^"]*"/g, "").replace(/\n[ \t]*\n[ \t]*Engagement: [^\n]*/g, "");
+      return [
+        `compactIsShorter:${compact.length < full.length}`,
+        `samePostCount:${full.split("<post ").length === compact.split("<post ").length}`,
+        `sameReplyBlocks:${full.split("<replies>").length === compact.split("<replies>").length}`,
+        `strippingFullGivesCompact:${strip(full) === compact}`,
+      ].join(" ");
+    },
+    expected: [
+      "compactIsShorter:true samePostCount:true sameReplyBlocks:true strippingFullGivesCompact:true",
     ],
   },
 

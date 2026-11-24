@@ -764,6 +764,20 @@ async function testFollowsAndFollowers() {
   assert.match(text(selfFollows), /Follow Record URI/);
   assert.match(text(selfFollows), /Bio: bio/);
 
+  // `detail` is one parameter with one vocabulary across every tool that has
+  // one, and it defaults to "full" here too — `get-follows` used to default to
+  // "compact", which is the one behaviour change of unifying them.
+  const selfDefault = assertSuccess(await callTool(selfAgent, "get-follows", { user: "self.test", limit: 2 }));
+  assert.match(selfDefault, /Retrieved 2 users that @self\.test follows \(via PDS-direct\)/);
+  assert.match(selfDefault, /Follow Record URI: at:\/\/did:plc:self-extra\/app\.bsky\.graph\.follow\/a/);
+  assert.match(selfDefault, /Bio: bio/);
+  assert.match(selfDefault, /Following: 2/);
+
+  const selfCompact = assertSuccess(await callTool(selfAgent, "get-follows", { user: "self.test", limit: 2, detail: "compact" }));
+  assert.match(selfCompact, /The bracketed at:\/\/ URI on each line is the follow record/);
+  assert.match(selfCompact, /^1\. @one\.test \(Detailed\) — did:plc:one-extra \[at:\/\/did:plc:self-extra\/app\.bsky\.graph\.follow\/a\]$/m);
+  assert.doesNotMatch(selfCompact, /Bio: bio|Followers:/);
+
   const otherAgent: any = {
     did: "did:plc:viewer-extra",
     getProfile: async () => ({ success: true, data: { did: "did:plc:other-extra", handle: "other.test" } }),

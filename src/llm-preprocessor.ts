@@ -8,7 +8,7 @@ import type {
   AppBskyFeedPost
 } from '@atproto/api';
 import { RichText } from '@atproto/api';
-import { escapeXml } from './utils.js';
+import { escapeXml, type DetailLevel } from './utils.js';
 
 /**
  * Base URL for the Bluesky web frontend.  Defaults to bsky.app (the
@@ -143,31 +143,31 @@ function determinePostType(post: AppBskyFeedDefs.PostView): string[] {
 }
 
 /**
- * How much of each post a feed render emits. `"full"` is the historical
- * output. `"compact"` drops the two token-heavy pieces — the `bsky_url`
- * attribute and the engagement line — and keeps `uri`, `type`, author,
- * timestamps, content and embeds, because `uri` is the argument every other
- * tool (`get-post-thread`, `create-reply`, `like-post`) takes. Thread grouping
- * and `<excluded_post>` tombstones are identical either way. See
- * `docs/post-format-spec.md`, "Detail levels".
+ * Options for the feed entry points (`preprocessPosts` and its wrappers).
+ *
+ * Feed detail levels come from the shared `DetailLevel` in `utils.ts` — the
+ * same two values every `detail` parameter in this server accepts.
+ * `"full"` is the historical output. `"compact"` drops the two token-heavy
+ * pieces — the `bsky_url` attribute and the engagement line — and keeps
+ * `uri`, `type`, author, timestamps, content and embeds, because `uri` is the
+ * argument every other tool (`get-post-thread`, `create-reply`, `like-post`)
+ * takes. Thread grouping and `<excluded_post>` tombstones are identical
+ * either way. See `docs/post-format-spec.md`, "Detail levels".
  */
-export type PostDetail = 'full' | 'compact';
-
-/** Options for the feed entry points (`preprocessPosts` and its wrappers). */
 export interface FeedFormatOptions {
   /** Defaults to `"full"`, so callers that pass nothing are unchanged. */
-  detail?: PostDetail;
+  detail?: DetailLevel;
 }
 
 /** `bsky_url` entry for a post, or no entry at all in compact mode. */
-function urlAttr(detail: PostDetail, uri: string, handle: string): Array<readonly [string, string]> {
+function urlAttr(detail: DetailLevel, uri: string, handle: string): Array<readonly [string, string]> {
   return detail === 'full' ? [['bsky_url', createBskyUrl(uri, handle)]] : [];
 }
 
 /**
  * Format a single post according to the spec
  */
-function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost, detail: PostDetail = 'full'): string {
+function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost, detail: DetailLevel = 'full'): string {
   const { post, reply, reason } = feedItem;
   
   // Handle repost specially
@@ -323,13 +323,55 @@ function formatEmbeds(post: AppBskyFeedDefs.PostView, indentation: string = ''):
 }
 
 /**
- * Format replies for a post
+ * Shift every line of a rendered block one level in. Whitespace-only lines are
+ * emptied rather than grown, so nesting never adds trailing whitespace and a
+ * separator line never sits at a stale column.
  */
-function formatReplies(feedItems: AppBskyFeedDefs.FeedViewPost[], parentUri: string, detail: PostDetail = 'full'): string {
-  // Find direct replies to this post
+function indentBlock(block: string, prefix: string): string {
+  return block.split('\n').map(line => (line.trim() ? `${prefix}${line}` : '')).join('\n');
+}
+
+/**
+ * Put a rendered `<replies>` block inside the post that carries it, directly
+ * before that post's closing `</post>`.
+ *
+ * A rendered block ends with `\n` plus the indentation of its own closing tag,
+ * so the block cannot simply be pasted at `lastIndexOf('</post>')` — that
+ * swallows the indentation and welds `</post>` onto the previous line. The
+ * indentation is lifted off the head and put back after the inserted block,
+ * and the block is shifted to the depth of the post it is being folded into:
+ * `formatReplies` renders for a post whose children sit at two spaces, while a
+ * reposted post's children sit at four.
+ *
+ * @param block A rendered post (or repost) that ends its post element with
+ *   `</post>` — for a repost that is the inner tag, and `</repost>` stays
+ *   outside it.
+ * @param replies The `formatReplies()` block to nest, which starts with its
+ *   own blank separator line.
+ */
+function nestRepliesInside(block: string, replies: string): string {
+  const closeAt = block.lastIndexOf('</post>');
+  const head = block.slice(0, closeAt);
+  const closeIndent = /[ \t]*$/.exec(head)?.[0] ?? '';
+  const body = closeIndent.length > 2
+    ? indentBlock(replies, ' '.repeat(closeIndent.length - 2))
+    : replies;
+  return `${head.slice(0, head.length - closeIndent.length)}${body}\n${closeIndent}${block.slice(closeAt)}`;
+}
+
+/**
+ * Format the `<replies>` section of a post: the batch items whose parent is
+ * this post, each nested inside it and recursively carrying its own replies,
+ * per "Thread Representation" in `docs/post-format-spec.md`.
+ */
+function formatReplies(feedItems: AppBskyFeedDefs.FeedViewPost[], parentUri: string, detail: DetailLevel = 'full'): string {
+  // Find direct replies to this post. The uri guard matters: `reply.parent`
+  // is data from the wire, and a record that replies to its own post would
+  // otherwise make the recursion below feed itself forever.
   const replies = feedItems.filter(item => 
     item.reply && 
     item.reply.parent.$type === 'app.bsky.feed.defs#postView' &&
+    item.post.uri !== parentUri &&
     (item.reply.parent as AppBskyFeedDefs.PostView).uri === parentUri
   );
   
@@ -337,85 +379,109 @@ function formatReplies(feedItems: AppBskyFeedDefs.FeedViewPost[], parentUri: str
     return '';
   }
   
-  let result = `\n\n    <replies>\n`;
-  
-  for (const reply of replies) {
-    // Format the reply
-    const formattedReply = formatPost(reply, detail);
+  const blocks = replies.map(reply => {
+    // One level in from the post that carries them — 4 spaces per level, which
+    // is what the spec example shows: `<replies>` at the same column as
+    // `<content>`, and the reply elements one column deeper.
+    let block = indentBlock(formatPost(reply, detail), '    ');
     
-    // Indent the reply content to maintain hierarchy
-    const indentedReply = formattedReply
-      .split('\n')
-      .map(line => `      ${line}`)
-      .join('\n');
-    
-    result += indentedReply;
-    
-    // Check for nested replies (recursive)
-    const nestedReplies = formatReplies(feedItems, reply.post.uri, detail);
-    if (nestedReplies) {
-      // Add indentation to nested replies
-      const indentedNestedReplies = nestedReplies
-        .split('\n')
-        .map(line => `  ${line}`)
-        .join('\n');
-      
-      // Insert before the closing post tag
-      const lastPostTagIndex = indentedReply.lastIndexOf('</post>');
-      result = result.substring(0, lastPostTagIndex) + indentedNestedReplies + result.substring(lastPostTagIndex);
+    const nested = formatReplies(feedItems, reply.post.uri, detail);
+    if (nested) {
+      // Nested replies live inside the reply's own closing `</post>`, which is
+      // also the inner one for a reposted reply. `nestRepliesInside` does the
+      // indenting, since the right depth follows from the carrier's own.
+      block = nestRepliesInside(block, nested);
     }
-  }
+    return block;
+  });
   
-  result += `\n    </replies>`;
-  return result;
+  // The single leading newline rides on the blank line the carrier post's own
+  // last line already ended with, so exactly one blank line separates it from
+  // `<replies>` — as in the spec's complete example.
+  return `\n    <replies>\n${blocks.join('\n')}\n    </replies>`;
 }
 
 /**
- * Group feed items into threads
+ * The URI of a feed item's parent when — and only when — that parent is in the
+ * same batch. A feed page is sparse: most replies carry their parent
+ * somewhere else, and those stay at top level with a `reply_to` that points
+ * outside the batch. Only a post actually present can hold its replies in the
+ * rendered tree.
+ *
+ * `uri !== item.post.uri` rejects a record that replies to itself. That is
+ * legal at the protocol level (and this server reads non-Bluesky PDSes), and
+ * without the guard the grouping below would put an item inside its own
+ * subtree.
  */
-function groupThreads(feedItems: AppBskyFeedDefs.FeedViewPost[]): { 
-  threads: Map<string, AppBskyFeedDefs.FeedViewPost[]>, 
-  standalone: AppBskyFeedDefs.FeedViewPost[] 
+function parentUriInBatch(item: AppBskyFeedDefs.FeedViewPost, presentUris: Set<string>): string | null {
+  const parent = item.reply?.parent;
+  if (!parent || parent.$type !== 'app.bsky.feed.defs#postView') return null;
+  const uri = (parent as AppBskyFeedDefs.PostView).uri;
+  return uri !== item.post.uri && presentUris.has(uri) ? uri : null;
+}
+
+/**
+ * Group a batch of feed items by the posts they reply to inside the batch.
+ *
+ * An item whose parent is not present — the common case in a timeline or
+ * algorithmic-feed page — is its own anchor, so it renders at top level. That
+ * keeps every post visible whatever the page happened to include, which is the
+ * point: an earlier version grouped by `reply.root`, assumed the root was in
+ * the batch, and silently dropped every reply it could not attach.
+ *
+ * Anchors come back in feed order; `groups` maps each anchor to the whole
+ * subtree rooted at it (anchor first), which is what `formatThread` renders.
+ */
+function groupFeedThreads(feedItems: AppBskyFeedDefs.FeedViewPost[]): {
+  anchors: AppBskyFeedDefs.FeedViewPost[];
+  groups: Map<AppBskyFeedDefs.FeedViewPost, AppBskyFeedDefs.FeedViewPost[]>;
 } {
-  const threads = new Map<string, AppBskyFeedDefs.FeedViewPost[]>();
-  const standalone: AppBskyFeedDefs.FeedViewPost[] = [];
-  
+  const presentUris = new Set(feedItems.map(item => item.post.uri));
+  const childrenByParent = new Map<string, AppBskyFeedDefs.FeedViewPost[]>();
+  const nested = new Set<AppBskyFeedDefs.FeedViewPost>();
+
   for (const item of feedItems) {
-    if (item.reply) {
-      // This is part of a thread
-      const rootUri = item.reply.root.$type === 'app.bsky.feed.defs#postView' ? 
-        (item.reply.root as AppBskyFeedDefs.PostView).uri : '';
-      
-      if (rootUri && !threads.has(rootUri)) {
-        threads.set(rootUri, []);
-      }
-      
-      if (rootUri) {
-        threads.get(rootUri)?.push(item);
-      }
-    } else {
-      // This is a standalone post
-      standalone.push(item);
-    }
+    const parentUri = parentUriInBatch(item, presentUris);
+    if (!parentUri) continue;
+    const siblings = childrenByParent.get(parentUri);
+    if (siblings) siblings.push(item);
+    else childrenByParent.set(parentUri, [item]);
+    nested.add(item);
   }
-  
-  return { threads, standalone };
+
+  const anchors = feedItems.filter(item => !nested.has(item));
+  const groups = new Map<AppBskyFeedDefs.FeedViewPost, AppBskyFeedDefs.FeedViewPost[]>();
+  for (const anchor of anchors) {
+    // Breadth-first over the in-batch reply links, so a group is in feed order
+    // and `formatReplies` can find each generation by matching parents.
+    // `includes` keeps a post that appears twice in one batch in the tree
+    // exactly once. A reply loop is unreachable from an anchor — every member
+    // of a loop has an in-batch parent, so none of them is an anchor — and any
+    // such leftover is rendered on its own by the caller.
+    const group: AppBskyFeedDefs.FeedViewPost[] = [anchor];
+    for (let i = 0; i < group.length; i++) {
+      const children = childrenByParent.get(group[i].post.uri);
+      if (!children) continue;
+      for (const child of children) {
+        if (!group.includes(child)) group.push(child);
+      }
+    }
+    groups.set(anchor, group);
+  }
+
+  return { anchors, groups };
 }
 
 /**
- * Format a complete thread
+ * Render one thread: the anchor plus every in-batch descendant of it, with the
+ * replies nested inside the post they respond to.
+ *
+ * `rootUri` is always the uri of an item in `feedItems` — `preprocessPosts`
+ * derives it from `groupFeedThreads`, which only ever picks anchors from the
+ * batch it was handed.
  */
-function formatThread(feedItems: AppBskyFeedDefs.FeedViewPost[], rootUri: string, detail: PostDetail = 'full'): string {
-  // Find the root post
-  const rootPost = feedItems.find(item => 
-    item.post.uri === rootUri || 
-    (item.reply && 
-     item.reply.root.$type === 'app.bsky.feed.defs#postView' &&
-     (item.reply.root as AppBskyFeedDefs.PostView).uri === rootUri && 
-     item.reply.parent.$type === 'app.bsky.feed.defs#postView' &&
-     (item.reply.parent as AppBskyFeedDefs.PostView).uri === rootUri)
-  );
-  
+function formatThread(feedItems: AppBskyFeedDefs.FeedViewPost[], rootUri: string, detail: DetailLevel = 'full'): string {
+  const rootPost = feedItems.find(item => item.post.uri === rootUri);
   if (!rootPost) {
     return '';
   }
@@ -426,14 +492,9 @@ function formatThread(feedItems: AppBskyFeedDefs.FeedViewPost[], rootUri: string
   // Add replies
   const replies = formatReplies(feedItems, rootUri, detail);
   if (replies) {
-    // Insert before the closing post tag
-    const lastPostTagIndex = result.lastIndexOf('</post>');
-    // If the post is a repost, we need to insert the replies into the nested post
-    if (result.includes('<repost') && result.includes('</post>')) {
-      result = result.substring(0, lastPostTagIndex) + replies + result.substring(lastPostTagIndex);
-    } else {
-      result = result.substring(0, lastPostTagIndex) + replies + result.substring(lastPostTagIndex);
-    }
+    // The replies go inside the closing post tag. For a repost that tag is the
+    // one inside `<repost>`, so the replies nest under the reposted post.
+    result = nestRepliesInside(result, replies);
   }
   
   return result;
@@ -464,17 +525,23 @@ function formatTombstone(tombstone: any, indent: string = ''): string {
 
 /**
  * Preprocess multiple posts into the XML format defined in the spec.
+ * A reply whose parent is in the same batch is nested in that post's
+ * `<replies>` element; a reply whose parent is elsewhere in the conversation
+ * renders at top level with `reply_to` pointing outside the batch, so nothing
+ * is ever hidden just because the page did not include the rest of the thread.
  * Excluded posts (marked with __aiPrefExcluded) are rendered as tombstone placeholders
- * so feed order and thread structure remain consistent.
+ * so feed order and thread structure remain consistent — a tombstone always
+ * stands at its own position rather than nesting, since the post that hid it
+ * may or may not be in the batch.
  * `options.detail` selects how much of each post is rendered; it defaults to
  * 'full' and applies to replies and quoted posts inside the same feed.
  */
 export function preprocessPosts(feedItems: AppBskyFeedDefs.FeedViewPost[], options: FeedFormatOptions = {}): string {
-  const detail: PostDetail = options.detail ?? 'full';
+  const detail: DetailLevel = options.detail ?? 'full';
   let result = '<posts>\n';
 
   // Separate normal items from tombstones for grouping, but track positions
-  const normalItems: any[] = [];
+  const normalItems: Array<{ item: AppBskyFeedDefs.FeedViewPost; originalIndex: number }> = [];
   const tombstoneIndices: number[] = [];
 
   feedItems.forEach((item, idx) => {
@@ -485,33 +552,36 @@ export function preprocessPosts(feedItems: AppBskyFeedDefs.FeedViewPost[], optio
     }
   });
 
-  // Group normal items into threads and standalone posts
-  const { threads, standalone } = groupThreads(normalItems.map(x => x.item));
-
-  // Format threads (with their original indices)
-  const threadItems: Array<{ item: any; index: number }> = [];
-  threads.forEach((items) => {
-    items.forEach(item => {
-      const origIdx = feedItems.indexOf(item);
-      if (origIdx >= 0) threadItems.push({ item, index: origIdx });
-    });
-  });
+  // Group normal items by the posts they reply to inside this batch
+  const { anchors, groups } = groupFeedThreads(normalItems.map(x => x.item));
+  const indexByItem = new Map<AppBskyFeedDefs.FeedViewPost, number>();
+  for (const { item, originalIndex } of normalItems) {
+    if (!indexByItem.has(item)) indexByItem.set(item, originalIndex);
+  }
 
   // Build ordered output by merging normal posts and tombstones at their original positions
   const allEntries: Array<{ type: 'post' | 'tombstone'; content: string; orderIndex: number }> = [];
 
-  // Add thread posts with their original indices
-  threadItems.forEach(({ item, index }) => {
-    const content = formatThread([item], Object.keys(threads).find(uri => threads.get(uri)?.includes(item)) || '', detail);
-    if (content) allEntries.push({ type: 'post', content, orderIndex: index });
-  });
+  // A group renders as one entry at its anchor's position, replies nested.
+  const rendered = new Set<AppBskyFeedDefs.FeedViewPost>();
+  for (const anchor of anchors) {
+    const group = groups.get(anchor) ?? [anchor];
+    for (const member of group) rendered.add(member);
+    const content = formatThread(group, anchor.post.uri, detail);
+    const orderIndex = indexByItem.get(anchor);
+    if (content && orderIndex !== undefined) {
+      allEntries.push({ type: 'post', content, orderIndex });
+    }
+  }
 
-  // Add standalone posts with their original indices
-  standalone.forEach((item, i) => {
-    const origIdx = feedItems.indexOf(item);
+  // Anything left was never reachable from an anchor — a malformed reply that
+  // points around in a circle. Render it on its own rather than dropping it.
+  for (const { item, originalIndex } of normalItems) {
+    if (rendered.has(item)) continue;
+    rendered.add(item);
     const content = formatPost(item, detail);
-    if (content) allEntries.push({ type: 'post', content, orderIndex: origIdx >= 0 ? origIdx : i });
-  });
+    if (content) allEntries.push({ type: 'post', content, orderIndex: originalIndex });
+  }
 
   // Add tombstones at their original positions
   tombstoneIndices.forEach(idx => {

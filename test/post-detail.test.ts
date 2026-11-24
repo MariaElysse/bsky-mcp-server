@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 import { runTests } from "./test-helpers.js";
 /**
- * post-detail.test — the `detail: "full" | "compact"` parameter on the
- * read-heavy list tools (get-timeline-posts, search-posts, get-liked-posts,
- * get-feed-posts, get-list-posts, get-user-posts).
+ * post-detail.test — the `detail: "full" | "compact"` parameter on every tool
+ * that has one: the read-heavy post lists (get-timeline-posts, search-posts,
+ * get-liked-posts, get-feed-posts, get-list-posts, get-user-posts) and
+ * get-follows.
  *
- * 'compact' prunes the same walk: it drops the `Engagement:` line and the
- * `bsky_url` attribute of every post (and of every quoted post) and nothing
- * else. `uri` stays on purpose — it is the argument `get-post-thread`,
- * `create-reply` and `like-post` take, so a compact read is still a workable
- * read. Post count, thread grouping, embeds and hidden-post markers are
- * identical either way.
+ * For the post lists 'compact' prunes the same walk: it drops the `Engagement:`
+ * line and the `bsky_url` attribute of every post (and of every quoted post)
+ * and nothing else. `uri` stays on purpose — it is the argument
+ * `get-post-thread`, `create-reply` and `like-post` take, so a compact read is
+ * still a workable read. Post count, thread grouping, embeds and hidden-post
+ * markers are identical either way.
  *
  * Covers:
  *  (1) the default is full: engagement counts and web URLs are present
@@ -19,6 +20,7 @@ import { runTests } from "./test-helpers.js";
  *  (4) compact renders the same posts and is strictly smaller
  *  (5) the cursor signal survives compact mode
  *  (6) a second funnel (get-liked-posts) honours the parameter
+ *  (7) get-follows shares the parameter, its default and its compact form
  */
 
 import assert from "node:assert/strict";
@@ -215,6 +217,81 @@ async function likedPostsCompactHonoursTheParameter() {
   assert.ok(compact.includes('uri="at://did:plc:u7/app.bsky.feed.post/r7"'), "compact should keep the uri");
 }
 
+// ---------------------------------------------------------------------------
+// (7) the other tool with a `detail` parameter: get-follows
+// ---------------------------------------------------------------------------
+
+/**
+ * A self-follows agent: `get-follows` reads the viewer's own graph straight
+ * from the PDS, which is the path that also carries the follow record URI.
+ */
+function createFollowAgent(): Agent {
+  const profileOf = (did: string) => ({
+    did,
+    handle: did.endsWith("-one") ? "one.test" : "two.test",
+    displayName: did.endsWith("-one") ? "One Test" : "Two Test",
+    description: "a bio that compact mode skips",
+    followersCount: 10,
+    followsCount: 20,
+    postsCount: 30,
+    indexedAt: "2021-08-04T13:32:00.000Z",
+  });
+
+  return {
+    did: "did:plc:viewer",
+    getProfile: async () => ({ success: true, data: { did: "did:plc:viewer", handle: "self.test" } }),
+    com: {
+      atproto: {
+        repo: {
+          listRecords: async () => ({
+            success: true,
+            data: {
+              records: [
+                { uri: "at://did:plc:viewer/app.bsky.graph.follow/one", value: { subject: "did:plc:subject-one" } },
+                { uri: "at://did:plc:viewer/app.bsky.graph.follow/two", value: { subject: "did:plc:subject-two" } },
+              ],
+              cursor: undefined,
+            },
+          }),
+        },
+      },
+    },
+    app: {
+      bsky: {
+        actor: {
+          // Counts only exist on the hydrated Detailed view, which is why full
+          // detail hydrates every DID and compact only the unresolved ones.
+          getProfiles: async ({ actors }: any) => ({ success: true, data: { profiles: actors.map(profileOf) } }),
+        },
+      },
+    },
+  } as unknown as Agent;
+}
+
+async function followsDefaultIsFullAndCompactIsOneLinePerFollow() {
+  const { full, compact } = await bothModes(createFollowAgent, "get-follows", { user: "self.test", limit: 2 });
+
+  // `get-follows` is the tool whose default flipped: it used to render the
+  // cheap one-line form unless the caller asked for `detail="full"`.
+  assert.ok(full.includes("Display Name: One Test"), "the default should render the full block");
+  assert.ok(full.includes("Bio: a bio that compact mode skips"), "full should include the bio");
+  assert.ok(full.includes("Followers: 10"), "full should include the counts");
+  assert.ok(full.includes("Follow Record URI: at://did:plc:viewer/app.bsky.graph.follow/one"), "full should name the follow record");
+
+  assert.ok(!compact.includes("Bio:") && !compact.includes("Followers:"), "compact should drop bios and counts");
+  assert.ok(
+    compact.includes("1. @one.test (One Test) — did:plc:subject-one [at://did:plc:viewer/app.bsky.graph.follow/one]"),
+    "compact should render one line per follow, with the follow record URI bracketed",
+  );
+
+  assert.equal(countOf(full, "did:plc:subject"), 2, "full should render every follow");
+  assert.equal(countOf(compact, "did:plc:subject"), 2, "compact should render the same follows");
+  assert.ok(compact.length < full.length, "compact should be strictly smaller");
+  const compactLines = compact.trim().split("\n").length;
+  const fullLines = full.trim().split("\n").length;
+  assert.ok(fullLines / compactLines > 3, `the saving should scale per entry (full ${fullLines} lines vs compact ${compactLines})`);
+}
+
 async function main() {
   const cases: Array<[string, () => void | Promise<void>]> = [
     ["get-timeline-posts: default detail renders engagement counts and web URLs", timelineDefaultIsFull],
@@ -223,6 +300,7 @@ async function main() {
     ["get-timeline-posts: detail=compact renders the same posts and costs fewer characters", timelineCompactRendersTheSamePostsAndIsSmaller],
     ["get-timeline-posts: detail=compact still advertises the cursor signal", timelineCompactStillSignalsTheCursor],
     ["get-liked-posts: detail=compact prunes the same lines the default emits", likedPostsCompactHonoursTheParameter],
+    ["get-follows: the default is the full block and compact is one line per follow", followsDefaultIsFullAndCompactIsOneLinePerFollow],
   ];
 
   await runTests(cases);

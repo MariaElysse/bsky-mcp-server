@@ -258,12 +258,38 @@ Or, you know, there'd be a coup
 ### Full Feed:
 ```xml
 <posts>
+  <post type="reply" uri="at://did:plc:twjze4qqf6fgxz33ct52wlnl/app.bsky.feed.post/3llwkkfiias2o" bsky_url="https://bsky.app/profile/volts.wtf/post/3llwkkfiias2o" author_name="David Roberts" author_handle="volts.wtf" posted_at="2025-04-03 11:42:11" reply_to="at://did:plc:twjze4qqf6fgxz33ct52wlnl/app.bsky.feed.post/3llwkeghjyk2o">
+    <content>
+      By the way, these links came to me via [@billmckibben.bsky.social](https://bsky.app/profile/did:plc:t6ylzujdaa3f6mlpxn6gjqf5)'s excellent newsletter, to which I assume you are all already subscribed.
+    </content>
+    
+    <embed type="link">
+      Title: "Hands off...the future"
+      URL: https://billmckibben.substack.com/p/hands-offthe-future?publication_id=438146&post_id=159935925&isFreemail=true&r=bzxnl&triedRedirect=true
+      Description: "So many ways to wreck an economy, and Trump is trying them all"
+    </embed>
+    
+    Engagement: 13 likes, 2 reposts, 0 replies
+  </post>
 </posts>
 ```
 
 ### Using preprocessPosts:
 ```xml
 <posts>
+  <post type="reply" uri="at://did:plc:twjze4qqf6fgxz33ct52wlnl/app.bsky.feed.post/3llwkkfiias2o" bsky_url="https://bsky.app/profile/volts.wtf/post/3llwkkfiias2o" author_name="David Roberts" author_handle="volts.wtf" posted_at="2025-04-03 11:42:11" reply_to="at://did:plc:twjze4qqf6fgxz33ct52wlnl/app.bsky.feed.post/3llwkeghjyk2o">
+    <content>
+      By the way, these links came to me via [@billmckibben.bsky.social](https://bsky.app/profile/did:plc:t6ylzujdaa3f6mlpxn6gjqf5)'s excellent newsletter, to which I assume you are all already subscribed.
+    </content>
+    
+    <embed type="link">
+      Title: "Hands off...the future"
+      URL: https://billmckibben.substack.com/p/hands-offthe-future?publication_id=438146&post_id=159935925&isFreemail=true&r=bzxnl&triedRedirect=true
+      Description: "So many ways to wreck an economy, and Trump is trying them all"
+    </embed>
+    
+    Engagement: 13 likes, 2 reposts, 0 replies
+  </post>
 </posts>
 ```
 

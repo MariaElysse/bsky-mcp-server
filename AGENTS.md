@@ -42,13 +42,13 @@ eslint.config.js          # ESLint 10 flat config behind `pnpm run lint` (ignore
 | `src/ai-preferences.ts` | AI preference system: reads/writes `community.lexicon.preference.ai` records, per-DID cache (5 min TTL, 5000-entry LRU, negative results cached), batch checking, tombstone replacement | ~480 |
 | `src/mention-store.ts` | Persistent mention deduplication store: JSON file backend, atomic writes, lock file with token + staleness window (`LOCK_STALE_MS = 30s`), per-status retention (`DEFAULT_RETENTION`) | ~820 |
 | `src/thread-context.ts` | Thread context retrieval and formatting for mention context tool, AI-preference filtering | ~380 |
-| `src/utils.ts` | Shared helpers: `cleanHandle()`, `validateUri()`, `mcpSuccessResponse()`, `mcpErrorResponse()`, `escapeXml()` | ~365 |
-| `src/llm-preprocessor.ts` | Formats raw Bluesky API responses into LLM-friendly text (`docs/post-format-spec.md`): two parameterized walkers (`renderThreadViewNode`, `renderThreadViewChain`) behind four named entry points, plus the `detail` levels for the feed path | ~1100 |
+| `src/utils.ts` | Shared helpers: `cleanHandle()`, `validateUri()`, `mcpSuccessResponse()`, `mcpErrorResponse()`, `escapeXml()`, the `DetailLevel` type | ~375 |
+| `src/llm-preprocessor.ts` | Formats raw Bluesky API responses into LLM-friendly text (`docs/post-format-spec.md`): two parameterized walkers (`renderThreadViewNode`, `renderThreadViewChain`) behind four named entry points, plus the feed-path grouping/nesting and its `detail` levels | ~1180 |
 | `src/link-preview.ts` | Fetches URL metadata via cardyb, uploads thumbnails to Bluesky | ~190 |
 | `test/pagination.test.ts` | 26 tests covering auto-fetch, cursor mode, hours mode, cursor-signal regressions | ~915 |
-| `test/register-tools.test.ts` | 20 tests over tool registration, annotations, error handling, agent resolution | ~845 |
+| `test/register-tools.test.ts` | 20 tests over tool registration, annotations, error handling, agent resolution | ~855 |
 | `test/test-helpers.ts` | `runTests(cases)` — registers `[name, fn]` tuples with `node:test`; the only shared runner glue | ~30 |
-| `docs/post-format-spec.md` | The XML post/thread format every content tool emits | ~295 |
+| `docs/post-format-spec.md` | The XML post/thread format every content tool emits | ~320 |
 | `tsconfig.json` | ES2020 target, nodenext modules, strict mode, `declaration`/`composite`. `"exclude": []` — everything under `src/`, `scripts/`, `test/` must compile | — |
 | `Dockerfile` | Build: install pnpm, install deps, compile TS (uses `node:lts-alpine`) | — |
 
@@ -152,10 +152,10 @@ can never break the lint job.
 - Cases registered through the helper are attributed by the reporter to `test-helpers.ts` rather than to the suite file. That is cosmetic; the case names are the suite's own.
 - `--test-concurrency=1` in `pnpm run test` is deliberate: several suites mutate process-global state (the AI-preference cache) and create stores under predictable temp paths, so files run one at a time. A full run is ~13 s.
 - The suites are selected by a **quoted glob**, not a directory argument. `node --test build/test/` works only on Node ≥ 23; on the CI matrix (22 and 24) the runner treats the directory as a test *file* and dies with `Cannot find module '…/build/test'` — which is exactly how the first `node --test` CI run failed on both matrix entries while green locally on Node 26. Keep the glob (`'build/test/**/*.js'`) in `pnpm run test`, and treat the matrix — not the local Node — as the authority on runner invocation.
-- The glob matches `.js` only, so the `*.d.ts` files `composite`/`declaration` emits beside the compiled tests are never listed as test files. `build/test/test-helpers.js` is the one matched file with no cases, so a full run's summary reads one entry higher than the real case count (318 vs 317 today: 316 offline cases plus the live suite).
+- The glob matches `.js` only, so the `*.d.ts` files `composite`/`declaration` emits beside the compiled tests are never listed as test files. `build/test/test-helpers.js` is the one matched file with no cases, so a full run's summary reads one entry higher than the real case count (328 vs 327 today: 326 offline cases plus the live suite).
 - Prefer `test()` case names that read as behaviour, and put regression tests in the suite that already owns the code path.
 
-**15 offline suites, 316 cases, plus 1 live suite (`node --test` prints the live counts):**
+**15 offline suites, 326 cases, plus 1 live suite (`node --test` prints the live counts):**
 
 | Suite | Cases | Covers |
 |---|---|---|
@@ -171,9 +171,9 @@ can never break the lint job.
 | `create-reply` | 14 | reply creation, URI validation, facets, dedup |
 | `custom-endpoint/test-custom-endpoint` | 9 | custom Bluesky frontend URL parsing |
 | `pagination` | 26 | auto-fetch, cursor mode, hours mode, cursor-signal regressions |
-| `post-detail` | 6 | the `detail` parameter on the read-heavy list tools: what compact drops, what it keeps, cursor signal intact |
+| `post-detail` | 7 | the `detail` parameter on all seven tools that declare it: what compact drops, what it keeps, cursor signal intact, the follows default |
 | `atproto-fetch` | 15 | timeouts, retry/backoff, error descriptions |
-| `llm-preprocessor` | 37 | post/thread/embed/feed formatting, full vs compact detail levels, against `docs/post-format-spec.md` |
+| `llm-preprocessor` | 46 | post/thread/embed/feed formatting, feed reply nesting and cycle termination, full vs compact detail levels, against `docs/post-format-spec.md` |
 | `tools/test-get-post-thread` | 1 | **live**: a real thread rendered through the format spec; self-skips without credentials |
 
 ## AI Preference System
@@ -227,8 +227,8 @@ When modifying content-fetching tools, ensure they respect AI preferences via `b
 - Converts Bluesky facets → Markdown links/mentions (uses `RichText` from `@atproto/api`)
 - Thread formatting with parent/child relationships, AI preference filtering with tombstones
 - Supports custom `BSKY_WEB_URL` for non-default Bluesky frontends
-- Six read-heavy list tools (timeline, search, liked, feed, list, user posts) take `detail: "full" | "compact"` — `compact` drops the `Engagement:` line and the `bsky_url` attribute of every post and quoted post and nothing else, so `uri`, structure, embeds and tombstones stay identical. Keep it a feed-path option: thread reads (`get-post-thread`, `get-mention-context`) and `get-notifications` deliberately render full detail. `docs/post-format-spec.md` → "Detail levels" is the contract; `test/post-detail.test.ts` and the compact goldens in `test/llm-preprocessor.test.ts` pin it.
-- `get-follows` already has an unrelated, older `detail` of its own (default `"compact"`, `"full"` adds bios and counts to follow lines). Same word, different payload and a different default — do not unify the two or reuse `DETAIL_PARAM` there; the JSDoc above `DETAIL_PARAM` in `src/tools.ts` says so too.
+- **One `detail` vocabulary.** Every `detail` parameter is built by the `detailParam` factory above the tool registrations in `src/tools.ts`, from the `DetailLevel` type in `src/utils.ts`, so the values (`"full" | "compact"`), their order and the default (`"full"`) cannot drift between tools. Seven tools expose it: the six read-heavy post lists (timeline, search, liked, feed, list, user posts) and `get-follows`. For posts `compact` drops the `Engagement:` line and the `bsky_url` attribute of every post and quoted post and nothing else, so `uri`, structure, embeds, nesting and tombstones stay identical. For follows it swaps whole blocks for one line per entry — the same *name*, one declaration, and per-payload prose in each tool's own description (same rule as the cursor wording: do not merge those descriptions). Keep it a feed-path option: thread reads (`get-post-thread`, `get-mention-context`) and `get-notifications` deliberately render full detail. `docs/post-format-spec.md` → "Detail Levels: `full` vs `compact`" is the contract; `test/post-detail.test.ts` and the compact goldens in `test/llm-preprocessor.test.ts` pin it. `get-follows` used to default to `"compact"`; unifying the parameter flipped its default to `"full"`, which is an intentional breaking change.
+- **Feed-path thread nesting** (`preprocessPosts` → `groupFeedThreads`/`formatThread`/`formatReplies` in `llm-preprocessor.ts`): a reply nests in a `<replies>` block inside the closing `</post>` of the post it responds to **only when that parent is in the same page** — grouping keys on parent presence, never on `reply.root`, because feed pages are sparse and grouping by root would strand most replies. A reply whose parent is outside the page renders at top level in page order, still `type="reply"` with `reply_to`. Nesting is recursion plus `nestRepliesInside`, which splices a `<replies>` block at the carrier's last `</post>` and derives the depth from that tag's own indentation (4 spaces per level); replies to a reposted post therefore nest inside `<repost>`. Self-replies and reference cycles terminate (self-reply guard, `!group.includes` de-dup, an orphan pass for members with no anchor), and `<excluded_post>` tombstones never nest. `test/llm-preprocessor.test.ts`'s nesting goldens pin all of this.
 
 ## Code Style Conventions
 
@@ -264,7 +264,7 @@ When modifying content-fetching tools, ensure they respect AI preferences via `b
 4. Update README.md with tool description and categorization
 5. Add tests in `test/` (or add cases to an existing suite) — a new file under `test/` is picked up automatically by the glob in `pnpm run test`; there is no runner file to register it in
 6. If the tool paginates, append the cursor signal and cover it in `test/pagination.test.ts`
-7. Run `pnpm run test` — the build and every suite must be green (the summary currently reports 318 entries: 317 real cases plus the zero-test `test-helpers.js` the glob also matches)
+7. Run `pnpm run test` — the build and every suite must be green (the summary currently reports 328 entries: 327 real cases plus the zero-test `test-helpers.js` the glob also matches)
 
 ## Transport
 
