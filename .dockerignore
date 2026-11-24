@@ -1,0 +1,47 @@
+# The Dockerfile does `COPY . .`, so anything not listed here ends up in an
+# image layer — including files that must never leave the host.
+
+# Secrets. The app password would sit in an image layer that anyone who can
+# pull the image can read. A baked-in .env.local is worse than dead weight:
+# src/index.ts loads it with dotenv.config({ path: '.env.local',
+# override: true }), so it silently beats the --env values passed at `docker
+# run`. A baked-in plain .env cannot override a variable that is already set,
+# but it still supplies host credentials for whatever the run command leaves out.
+.env
+.env.*
+
+# Host binaries. pnpm install already ran in an earlier layer against the
+# image's own platform; a macOS node_modules copied on top of it shadows those
+# installs with the wrong binaries and symlinks.
+node_modules/
+.pnpm-store/
+.npm/
+
+# Build artifacts are rebuilt inside the image.
+build/
+dist/
+out/
+*.tsbuildinfo
+
+# Repository metadata and scratch space that the build never reads.
+.git/
+.gitignore
+.github/
+.qwen/
+.cursorrules
+tmp/
+temp/
+sessions/
+*.session.json
+
+# Logs and editor noise.
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.eslintcache
+coverage/
+.nyc_output/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

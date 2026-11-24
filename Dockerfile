@@ -1,7 +1,10 @@
 FROM node:lts-alpine
 
-# Install pnpm
-RUN npm install -g pnpm
+# Install pnpm. Pinned, because `pnpm install --frozen-lockfile` below has to
+# use a pnpm that reads the lockfile its peer wrote: a floating `pnpm` would
+# drift from `packageManager` in package.json on the next major release.
+# Keep this version in sync with `packageManager` when bumping either.
+RUN npm install -g pnpm@12.23.0
 
 # Set working directory
 WORKDIR /app
