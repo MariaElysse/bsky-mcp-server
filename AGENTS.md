@@ -89,7 +89,7 @@ pnpm install              # Install dependencies
 pnpm run build            # Compile TypeScript + create build/test/ dir
 pnpm run start            # Run the stdio MCP server
 pnpm run dev              # Build and run in one step
-pnpm run test             # Build, then: node --test --test-concurrency=1 --test-reporter=spec build/test/
+pnpm run test             # Build, then: node --test --test-concurrency=1 --test-reporter=spec 'build/test/**/*.js'
 pnpm run lint             # ESLint over every .ts/.js outside build/, tmp/ and the scratch dirs
 
 # Suites with their own package.json scripts:
@@ -101,7 +101,7 @@ node --test --test-reporter=spec build/test/pagination.test.js
 node --test --test-reporter=spec build/test/link-preview/test-link-preview.js
 
 # Run only cases whose name matches a pattern — the reason `--test` is worth it:
-node --test --test-name-pattern=tombstone build/test/
+node --test --test-name-pattern=tombstone 'build/test/**/*.js'
 
 # Example-data generators (rewrite test/*_examples_results.md):
 pnpm run process-posts
@@ -147,11 +147,12 @@ can never break the lint job.
 ## Testing Conventions
 
 - Tests use the built-in **`node:test`** runner — no Jest, Mocha, or test framework in `package.json`.
-- Every file under `test/` is a self-contained ESM module compiled into `build/test/` and discovered by `node --test build/test/`. There is no orchestrator file to keep in sync; adding a suite means adding a file.
+- Every file under `test/` is a self-contained ESM module compiled into `build/test/` and discovered by the quoted glob in `pnpm run test`. There is no orchestrator file to keep in sync; adding a suite means adding a file.
 - Suites declare cases as `[name, fn]` tuples and hand them to `runTests()` from `test/test-helpers.ts`, which registers each with `test()` and **awaits** the lot. The await matters: suites create temp directories above the call and delete them below it, and the runner executes registered cases while the module is still evaluating, so a helper that returned immediately would let teardown race the cases (it produced 76 `ENOENT` failures the first time it was tried).
 - Cases registered through the helper are attributed by the reporter to `test-helpers.ts` rather than to the suite file. That is cosmetic; the case names are the suite's own.
 - `--test-concurrency=1` in `pnpm run test` is deliberate: several suites mutate process-global state (the AI-preference cache) and create stores under predictable temp paths, so files run one at a time. A full run is ~13 s.
-- Node ≥ 23 type-strips the `*.d.ts` files that `composite`/`declaration` emits next to the compiled tests and lists each as a test file with no cases, so the summary reports a handful of entries more than the real case count (311 vs 305 today). Harmless.
+- The suites are selected by a **quoted glob**, not a directory argument. `node --test build/test/` works only on Node ≥ 23; on the CI matrix (22 and 24) the runner treats the directory as a test *file* and dies with `Cannot find module '…/build/test'` — which is exactly how the first `node --test` CI run failed on both matrix entries while green locally on Node 26. Keep the glob (`'build/test/**/*.js'`) in `pnpm run test`, and treat the matrix — not the local Node — as the authority on runner invocation.
+- The glob matches `.js` only, so the `*.d.ts` files `composite`/`declaration` emits beside the compiled tests are never listed as test files. `build/test/test-helpers.js` is the one matched file with no cases, so a full run's summary reads one entry higher than the real case count (306 vs 305 today: 304 offline cases plus the live suite).
 - Prefer `test()` case names that read as behaviour, and put regression tests in the suite that already owns the code path.
 
 **14 offline suites, 304 cases, plus 1 live suite (`node --test` prints the live counts):**
@@ -257,9 +258,9 @@ When modifying content-fetching tools, ensure they respect AI preferences via `b
 2. Implement the handler with proper error handling via try/catch + `mcpErrorResponse()`
 3. Add AI preference filtering if fetching user content (call `batchCheckAiPreferences()` + `filterPostsByAiPreferences()`)
 4. Update README.md with tool description and categorization
-5. Add tests in `test/` (or add cases to an existing suite) — a new file under `test/` is discovered automatically by `node --test build/test/`; there is no runner file to register it in
+5. Add tests in `test/` (or add cases to an existing suite) — a new file under `test/` is picked up automatically by the glob in `pnpm run test`; there is no runner file to register it in
 6. If the tool paginates, append the cursor signal and cover it in `test/pagination.test.ts`
-7. Run `pnpm run test` — the build and every suite must be green (the summary currently reports 311 entries: 305 real cases plus the zero-test `.d.ts` files Node lists)
+7. Run `pnpm run test` — the build and every suite must be green (the summary currently reports 306 entries: 305 real cases plus the zero-test `test-helpers.js` the glob also matches)
 
 ## Transport
 
