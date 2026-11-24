@@ -817,6 +817,180 @@ export const CASES: Case[] = [
       "</posts>",
     ],
   },
+
+  // ---------------------------------------------------------------------------
+  // detail: "compact" — the same walk with the engagement line and the
+  // bsky_url attribute dropped. Everything else (uri, type, author, timestamps,
+  // content, embeds, repost nesting, hidden-post markers) is byte-identical to
+  // full mode. These goldens are the contract README.md and
+  // docs/post-format-spec.md ("Detail levels") document.
+  // ---------------------------------------------------------------------------
+  {
+    name: "feed compact: standalone post keeps uri but drops bsky_url and the engagement line",
+    run: (m) => m.preprocessPosts(
+      [feedItem({ uri: uriOf(ALICE, "c1"), likeCount: 7, indexedAt: "2021-08-04T13:30:00.000Z" })],
+      { detail: "compact" },
+    ),
+    expected: [
+      "<posts>",
+      "  <post type=\"standalone\" uri=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/c1\" author_name=\"Alice A.\" author_handle=\"alice.test\" posted_at=\"2021-08-04 13:30:00\">",
+      "    <content>",
+      "      feed text",
+      "    </content>",
+      "  </post>",
+      "</posts>",
+    ],
+  },
+  {
+    name: "feed compact: repost nesting is unchanged and neither engagement line survives",
+    run: (m) => m.preprocessPosts(
+      [feedItem({
+        uri: uriOf(ALICE, "c2"),
+        likeCount: 4,
+        indexedAt: "2021-08-04T13:30:00.000Z",
+        reason: {
+          $type: "app.bsky.feed.defs#reasonRepost",
+          by: { did: BOB, handle: "bob.test" },
+          indexedAt: "2021-08-05T01:02:03.000Z",
+        },
+      })],
+      { detail: "compact" },
+    ),
+    expected: [
+      "<posts>",
+      "  <repost author_name=\"\" author_handle=\"bob.test\" reposted_at=\"2021-08-05 01:02:03\">",
+      "    <post type=\"standalone\" uri=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/c2\" author_name=\"Alice A.\" author_handle=\"alice.test\" posted_at=\"2021-08-04 13:30:00\">",
+      "      <content>",
+      "        feed text",
+      "      </content>",
+      "    </post>",
+      "  </repost>",
+      "</posts>",
+    ],
+  },
+  {
+    name: "feed compact: quoted post keeps its uri and drops url plus engagement",
+    run: (m) => m.preprocessPosts(
+      [{
+        post: postView({
+          uri: uriOf(ALICE, "c3"),
+          likeCount: 9,
+          indexedAt: "2021-08-04T13:30:00.000Z",
+          embed: {
+            $type: "app.bsky.embed.record#view",
+            record: {
+              $type: "app.bsky.embed.record#viewRecord",
+              uri: uriOf(CAROL, "c3q"),
+              cid: "quoteCid",
+              author: { did: CAROL, handle: "carol.test", displayName: "Carol" },
+              value: { text: "quoted text", createdAt: "2021-08-04T12:00:00.000Z" },
+              likeCount: 3,
+              repostCount: 1,
+              replyCount: 2,
+            },
+          },
+        }),
+      }],
+      { detail: "compact" },
+    ),
+    expected: [
+      "<posts>",
+      "  <post type=\"standalone,quote\" uri=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/c3\" author_name=\"Alice A.\" author_handle=\"alice.test\" posted_at=\"2021-08-04 13:30:00\">",
+      "    <content>",
+      "      hello world",
+      "    </content>",
+      "    ",
+      "    <quoted_post uri=\"at://did:plc:gggg7777hhhh8888iiii9999/app.bsky.feed.post/c3q\" author_name=\"Carol\" author_handle=\"carol.test\" posted_at=\"2021-08-04 12:00:00\">",
+      "      <content>",
+      "        quoted text",
+      "      </content>",
+      "    </quoted_post>",
+      "  </post>",
+      "</posts>",
+    ],
+  },
+  {
+    name: "feed compact: embeds survive the pruning pass",
+    run: (m) => m.preprocessPosts(
+      [
+        feedItem({ uri: uriOf(ALICE, "c4"), likeCount: 11, indexedAt: "2021-08-04T13:30:00.000Z" }),
+        {
+          post: postView({
+            uri: uriOf(BOB, "c9"),
+            author: { did: BOB, handle: "bob.test", displayName: "Bob B." },
+            text: "a picture post",
+            likeCount: 3,
+            embed: {
+              $type: "app.bsky.embed.images#view",
+              images: [{ thumb: "https://x/thumb.png", fullsize: "https://x/full.png", alt: "a alt" }],
+            },
+          }),
+        },
+      ],
+      { detail: "compact" },
+    ),
+    expected: [
+      "<posts>",
+      "  <post type=\"standalone\" uri=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/c4\" author_name=\"Alice A.\" author_handle=\"alice.test\" posted_at=\"2021-08-04 13:30:00\">",
+      "    <content>",
+      "      feed text",
+      "    </content>",
+      "  </post>",
+      "",
+      "  <post type=\"standalone\" uri=\"at://did:plc:dddd4444eeee5555ffff6666/app.bsky.feed.post/c9\" author_name=\"Bob B.\" author_handle=\"bob.test\" posted_at=\"2021-08-04 13:30:00\">",
+      "    <content>",
+      "      a picture post",
+      "    </content>",
+      "    ",
+      "    <embed type=\"image\">",
+      "      Image description: \"a alt\"",
+      "      Image URL: https://x/full.png",
+      "    </embed>",
+      "  </post>",
+      "</posts>",
+    ],
+  },
+  {
+    name: "feed compact: hidden-post markers are byte-identical to full mode",
+    run: (m) => m.preprocessPosts(
+      [feedItem({ uri: uriOf(ALICE, "c6"), indexedAt: "2021-08-04T13:30:00.000Z" }), tombstone({ uri: uriOf(CAROL, "c7") })],
+      { detail: "compact" },
+    ),
+    expected: [
+      "<posts>",
+      "  <post type=\"standalone\" uri=\"at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/c6\" author_name=\"Alice A.\" author_handle=\"alice.test\" posted_at=\"2021-08-04 13:30:00\">",
+      "    <content>",
+      "      feed text",
+      "    </content>",
+      "  </post>",
+      "",
+      "<excluded_post reason=\"ai_preferences\" author_handle=\"carol.test\" uri=\"at://did:plc:gggg7777hhhh8888iiii9999/app.bsky.feed.post/c7\">This post is hidden because the author has disabled AI inference/training in their Bluesky preferences.</excluded_post>",
+      "</posts>",
+    ],
+  },
+  {
+    name: "detail: full is the default and compact renders strictly less for the same feed",
+    run: (m) => {
+      const items = [feedItem({ uri: uriOf(ALICE, "c8"), likeCount: 5, indexedAt: "2021-08-04T13:30:00.000Z" })];
+      const implicit = m.formatFeed({ items });
+      const full = m.formatFeed({ items }, { detail: "full" });
+      const compact = m.formatFeed({ items }, { detail: "compact" });
+      return [
+        `defaultIsFull:${implicit === full}`,
+        `compactDiffers:${implicit !== compact}`,
+        `fullHasEngagement:${full.includes("Engagement:")}`,
+        `compactHasEngagement:${compact.includes("Engagement:")}`,
+        `fullHasUrl:${full.includes("bsky_url=")}`,
+        `compactHasUrl:${compact.includes("bsky_url=")}`,
+        `compactKeepsUri:${compact.includes('uri="at://did:plc:aaaa1111bbbb2222cccc3333/app.bsky.feed.post/c8"')}`,
+        `compactIsShorter:${compact.length < full.length}`,
+        `emptyFeedIsUnchanged:${m.preprocessPosts([], { detail: "compact" }) === m.preprocessPosts([])}`,
+      ].sort().join(" ");
+    },
+    expected: [
+      "compactDiffers:true compactHasEngagement:false compactHasUrl:false compactIsShorter:true compactKeepsUri:true defaultIsFull:true emptyFeedIsUnchanged:true fullHasEngagement:true fullHasUrl:true",
+    ],
+  },
 ];
 
 // ---------------------------------------------------------------------------

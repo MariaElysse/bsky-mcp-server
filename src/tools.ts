@@ -19,7 +19,7 @@ import {
   mcpSuccessResponse,
   parsePostUri,
 } from './utils.js';
-import { preprocessPosts, formatPostThread, formatPostThreadWithAiPrefs, filterThreadByAiPreferences } from "./llm-preprocessor.js";
+import { preprocessPosts, formatPostThread, formatPostThreadWithAiPrefs, filterThreadByAiPreferences, type PostDetail } from "./llm-preprocessor.js";
 import { fetchLinkMetadata, uploadThumbnail } from './link-preview.js';
 import { batchCheckAiPreferences, batchCheckAiPreferenceRecords, filterPostsByAiPreferences, getDidsFromThread, type AiPreferencesRecord } from './ai-preferences.js';
 import { MentionStore, getMentionStore } from './mention-store.js';
@@ -39,6 +39,14 @@ const ANNOTATE_LOCAL_READ = { readOnlyHint: true, openWorldHint: false } as cons
 const ANNOTATE_WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
 const ANNOTATE_WRITE_IDEMPOTENT = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
 const ANNOTATE_DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true } as const;
+
+/**
+ * Shared `detail` parameter for the post-list tools. `bsky_url` and the
+ * engagement line are a large share of the tokens per post, and neither is
+ * something a summarizing caller acts on — `uri` is the argument every other
+ * tool takes. One schema instance so the wording cannot drift between tools.
+ */
+const DETAIL_PARAM = z.enum(["full", "compact"]).default("full").describe("How much of each post to render. 'full' (default) includes engagement counts and bsky_url. 'compact' omits both and keeps uri, type, author, timestamps, content and embeds — post structure, thread grouping and hidden-post markers are identical either way.");
 
 /**
  * Filter posts by the current user's AI preferences.
@@ -65,7 +73,8 @@ function readReplyRoot(record: unknown): { uri: string; cid: string } | undefine
 async function filterPostsByAiPrefs(
   agent: any,
   posts: any[],
-  entityType: string = 'posts'
+  entityType: string = 'posts',
+  detail: PostDetail = 'full'
 ): Promise<{ text: string; count: number }> {
   // Collect unique DIDs from post authors (skip tombstones)
   const didSet = new Set<string>();
@@ -104,8 +113,10 @@ async function filterPostsByAiPrefs(
     };
   }
 
-  // Format results — tombstones are rendered as <excluded_post> elements by preprocessPosts
-  const formattedPosts = preprocessPosts(filtered);
+  // Format results — tombstones are rendered as <excluded_post> elements by
+  // preprocessPosts, at the detail level the caller asked for: 'compact' drops
+  // the engagement line and bsky_url of every post. See docs/post-format-spec.md.
+  const formattedPosts = preprocessPosts(filtered, { detail });
   let summaryText = formatSummaryText(filtered.length - skippedCount, entityType);
   if (skippedCount > 0) {
     summaryText += ` [${skippedCount} post(s) hidden due to your AI preferences]`;
@@ -169,14 +180,15 @@ export function registerTools(
 
   server.tool(
     "get-timeline-posts",
-    "Fetch your home timeline from Bluesky, which includes posts from all of the people you follow in reverse chronological order. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page.",
+    "Fetch your home timeline from Bluesky, which includes posts from all of the people you follow in reverse chronological order. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page. Set `detail='compact'` to drop engagement counts and web URLs from every post, which is materially cheaper on large reads.",
     {
       count: z.number().min(1).max(500).default(20).describe("Number of posts to fetch (1-500). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
       type: z.enum(["posts", "hours"]).default("posts").describe("Whether count represents number of posts or hours to look back. In cursor mode, only 'posts' is supported."),
-      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'.")
+      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'."),
+      detail: DETAIL_PARAM
     },
     ANNOTATE_READ,
-    async ({ count, type, cursor }) => {
+    async ({ count, type, cursor, detail }) => {
       try {
         const agent = getAgent();
         if (!agent) {
@@ -270,7 +282,7 @@ export function registerTools(
         }
 
         // Enforce AI preferences: filter out content from users who deny inference/training
-        const result = await filterPostsByAiPrefs(agent, allPosts, "timeline");
+        const result = await filterPostsByAiPrefs(agent, allPosts, "timeline", detail);
         let responseText = result.text;
 
         // Expose the cursor whenever the API returned one: every page is fetched with
@@ -564,14 +576,15 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
 
   server.tool(
     "search-posts",
-    "Search for posts on Bluesky. Note: Bluesky uses strict AND matching - all search terms must be present in a post for it to match. This differs from web search engines which use loose/fuzzy matching. Searching for 'a b c' requires ALL of a, b, AND c to appear in matching posts. Supported operators: from:handle, to:handle, mentions:handle, url:domain, lang:code (e.g., lang:en), has:images, has:video, has:link.",
+    "Search for posts on Bluesky. Note: Bluesky uses strict AND matching - all search terms must be present in a post for it to match. This differs from web search engines which use loose/fuzzy matching. Searching for 'a b c' requires ALL of a, b, AND c to appear in matching posts. Supported operators: from:handle, to:handle, mentions:handle, url:domain, lang:code (e.g., lang:en), has:images, has:video, has:link. Set `detail='compact'` to drop engagement counts and web URLs from every post, which is materially cheaper on large reads.",
     {
       query: z.string().describe("Search query. Uses strict AND matching - all terms must match. Supported operators: from:, to:, mentions:, url:, lang:, has:images, has:video, has:link"),
       limit: z.number().min(1).max(100).default(50).describe("Number of results to fetch (1-100)"),
       sort: z.enum(["top", "latest"]).default("top").describe("Sort order for search results - 'top' for most relevant or 'latest' for most recent"),
+      detail: DETAIL_PARAM,
     },
     ANNOTATE_READ,
-    async ({ query, limit, sort }) => {
+    async ({ query, limit, sort, detail }) => {
       const agent = getSearchAgent();
       if (!agent) {
         return mcpErrorResponse("Not logged in. Please check your environment variables.");
@@ -598,7 +611,7 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
         }));
 
         // Enforce AI preferences: filter out content from users who deny inference/training
-        const result = await filterPostsByAiPrefs(agent, feedViewPosts, "search results");
+        const result = await filterPostsByAiPrefs(agent, feedViewPosts, "search results", detail);
 
         return mcpSuccessResponse(result.text);
       } catch (error) {
@@ -781,13 +794,14 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
 
   server.tool(
     "get-liked-posts",
-    "Get a list of posts that the authenticated user has liked. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `limit` posts, or pass a cursor from a previous response to fetch the next page.",
+    "Get a list of posts that the authenticated user has liked. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `limit` posts, or pass a cursor from a previous response to fetch the next page. Set `detail='compact'` to drop engagement counts and web URLs from every post, which is materially cheaper on large reads.",
     {
       limit: z.number().min(1).max(100).default(20).describe("Maximum number of liked posts to fetch (1-100). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
-      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call.")
+      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call."),
+      detail: DETAIL_PARAM
     },
     ANNOTATE_READ,
-    async ({ limit, cursor }) => {
+    async ({ limit, cursor, detail }) => {
       const agent = getAgent();
       if (!agent) {
         return mcpErrorResponse("Not logged in. Please check your environment variables.");
@@ -857,7 +871,7 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
         }
 
         // Enforce AI preferences: filter out content from users who deny inference/training
-        const result = await filterPostsByAiPrefs(agent, allLikes, "liked posts");
+        const result = await filterPostsByAiPrefs(agent, allLikes, "liked posts", detail);
         let responseText = result.text;
 
         // Expose the cursor whenever the API returned one: every page is fetched with
@@ -1241,15 +1255,16 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
   server.tool(
     "get-feed-posts",
-    "Fetch posts from a specified feed. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page.",
+    "Fetch posts from a specified feed. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page. Set `detail='compact'` to drop engagement counts and web URLs from every post, which is materially cheaper on large reads.",
     {
       feed: z.string().describe("The URI of the feed to fetch posts from (e.g., at://did:plc:abcdef/app.bsky.feed.generator/whats-hot)"),
       count: z.number().min(1).max(500).default(20).describe("Number of posts to fetch (1-500). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
       type: z.enum(["posts", "hours"]).default("posts").describe("Whether count represents number of posts or hours to look back. In cursor mode, only 'posts' is supported."),
-      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'.")
+      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'."),
+      detail: DETAIL_PARAM
     },
     ANNOTATE_READ,
-    async ({ feed, count, type, cursor }) => {
+    async ({ feed, count, type, cursor, detail }) => {
       const agent = getAgent();
       if (!agent) {
         return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
@@ -1351,7 +1366,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
         }
 
         // Enforce AI preferences: filter out content from users who deny inference/training
-        const result = await filterPostsByAiPrefs(agent, allPosts, "feed");
+        const result = await filterPostsByAiPrefs(agent, allPosts, "feed", detail);
         let responseText = result.text;
 
         // Expose the cursor whenever the API returned one: every page is fetched with
@@ -1370,15 +1385,16 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
   server.tool(
     "get-list-posts",
-    "Fetch posts from users in a specified list. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page.",
+    "Fetch posts from users in a specified list. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page. Set `detail='compact'` to drop engagement counts and web URLs from every post, which is materially cheaper on large reads.",
     {
       list: z.string().describe("The URI of the list (e.g., at://did:plc:abcdef/app.bsky.graph.list/listname)"),
       count: z.number().min(1).max(500).default(20).describe("Number of posts to fetch (1-500). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
       type: z.enum(["posts", "hours"]).default("posts").describe("Whether count represents number of posts or hours to look back. In cursor mode, only 'posts' is supported."),
-      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'.")
+      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'."),
+      detail: DETAIL_PARAM
     },
     ANNOTATE_READ,
-    async ({ list, count, type, cursor }) => {
+    async ({ list, count, type, cursor, detail }) => {
       const agent = getAgent();
       if (!agent) {
         return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
@@ -1480,7 +1496,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
         }
 
         // Enforce AI preferences: filter out content from users who deny inference/training
-        const result = await filterPostsByAiPrefs(agent, allPosts, "list");
+        const result = await filterPostsByAiPrefs(agent, allPosts, "list", detail);
         let responseText = result.text;
 
         // Expose the cursor whenever the API returned one: every page is fetched with
@@ -1499,7 +1515,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
   server.tool(
     "get-user-posts",
-    "Fetch posts from a specific user. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page.",
+    "Fetch posts from a specific user. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page. Set `detail='compact'` to drop engagement counts and web URLs from every post, which is materially cheaper on large reads.",
     {
       user: z.string().describe("The handle or DID of the user (e.g., alice.bsky.social)"),
       count: z.number().min(1).max(500).default(20).describe("Number of posts to fetch (1-500). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
@@ -1511,10 +1527,11 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
         "posts_with_media",
         "posts_with_video"
       ]).default("posts_with_replies").describe("Filter posts by type. Default includes replies. Options: posts_with_replies (all posts including replies), posts_no_replies (exclude replies), posts_and_author_threads (posts and self-reply threads), posts_with_media (only posts with media), posts_with_video (only posts with video)"),
-      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'.")
+      cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call or when using type='hours'."),
+      detail: DETAIL_PARAM
     },
     ANNOTATE_READ,
-    async ({ user, count, type, filter, cursor }) => {
+    async ({ user, count, type, filter, cursor, detail }) => {
       const agent = getAgent();
       if (!agent) {
         return mcpErrorResponse("Not connected to Bluesky. Check your environment variables.");
@@ -1619,7 +1636,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
           }
 
           // Enforce AI preferences: filter out content from users who deny inference/training
-          const result = await filterPostsByAiPrefs(agent, allPosts, "user");
+          const result = await filterPostsByAiPrefs(agent, allPosts, "user", detail);
           let responseText = result.text;
 
           // Expose the cursor whenever the API returned one: every page is fetched with

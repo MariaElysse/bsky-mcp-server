@@ -143,9 +143,31 @@ function determinePostType(post: AppBskyFeedDefs.PostView): string[] {
 }
 
 /**
+ * How much of each post a feed render emits. `"full"` is the historical
+ * output. `"compact"` drops the two token-heavy pieces — the `bsky_url`
+ * attribute and the engagement line — and keeps `uri`, `type`, author,
+ * timestamps, content and embeds, because `uri` is the argument every other
+ * tool (`get-post-thread`, `create-reply`, `like-post`) takes. Thread grouping
+ * and `<excluded_post>` tombstones are identical either way. See
+ * `docs/post-format-spec.md`, "Detail levels".
+ */
+export type PostDetail = 'full' | 'compact';
+
+/** Options for the feed entry points (`preprocessPosts` and its wrappers). */
+export interface FeedFormatOptions {
+  /** Defaults to `"full"`, so callers that pass nothing are unchanged. */
+  detail?: PostDetail;
+}
+
+/** `bsky_url` entry for a post, or no entry at all in compact mode. */
+function urlAttr(detail: PostDetail, uri: string, handle: string): Array<readonly [string, string]> {
+  return detail === 'full' ? [['bsky_url', createBskyUrl(uri, handle)]] : [];
+}
+
+/**
  * Format a single post according to the spec
  */
-function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
+function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost, detail: PostDetail = 'full'): string {
   const { post, reply, reason } = feedItem;
   
   // Handle repost specially
@@ -161,7 +183,6 @@ function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
     
     // Format the original post (without the repost type)
     const types = determinePostType(post);
-    const bskyUrl = createBskyUrl(post.uri, post.author.handle);
     const record = post.record as AppBskyFeedPost.Record;
     const postDate = formatDate(record.createdAt);
     
@@ -169,7 +190,7 @@ function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
     result += `    <post ${xmlAttrs([
       ['type', types.join(',')],
       ['uri', post.uri],
-      ['bsky_url', bskyUrl],
+      ...urlAttr(detail, post.uri, post.author.handle),
       ['author_name', post.author.displayName || ''],
       ['author_handle', post.author.handle],
       ['posted_at', postDate],
@@ -180,7 +201,9 @@ function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
     result += formatEmbeds(post, '      ');
     
     // Add engagement metrics info (without Posted: prefix)
-    result += `      \n      Engagement: ${post.likeCount} likes, ${post.repostCount} reposts, ${post.replyCount} replies${post.quoteCount ? ', ' + post.quoteCount + ' quotes' : ''}\n`;
+    if (detail === 'full') {
+      result += `      \n      Engagement: ${post.likeCount} likes, ${post.repostCount} reposts, ${post.replyCount} replies${post.quoteCount ? ', ' + post.quoteCount + ' quotes' : ''}\n`;
+    }
     
     // Close the post and repost tags
     result += `    </post>\n`;
@@ -191,7 +214,6 @@ function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
   
   // For non-reposts, continue with normal formatting
   const types = determinePostType(post);
-  const bskyUrl = createBskyUrl(post.uri, post.author.handle);
   const record = post.record as AppBskyFeedPost.Record;
   const postDate = formatDate(record.createdAt);
   
@@ -199,7 +221,7 @@ function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
   let postAttrs = xmlAttrs([
     ['type', types.join(',')],
     ['uri', post.uri],
-    ['bsky_url', bskyUrl],
+    ...urlAttr(detail, post.uri, post.author.handle),
     ['author_name', post.author.displayName || ''],
     ['author_handle', post.author.handle],
     ['posted_at', postDate],
@@ -222,18 +244,19 @@ function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
     const embedRecord = post.embed as AppBskyEmbedRecord.View;
     if (embedRecord.record && embedRecord.record.$type === 'app.bsky.embed.record#viewRecord') {
       const recordView = embedRecord.record as AppBskyEmbedRecord.ViewRecord;
-      const quotedUrl = createBskyUrl(recordView.uri, recordView.author.handle);
       const quotedRecord = recordView.value as { text: string; createdAt: string };
       const quotedPostDate = formatDate(quotedRecord.createdAt);
       result += `    \n    <quoted_post ${xmlAttrs([
         ['uri', recordView.uri],
-        ['bsky_url', quotedUrl],
+        ...urlAttr(detail, recordView.uri, recordView.author.handle),
         ['author_name', recordView.author.displayName || ''],
         ['author_handle', recordView.author.handle],
         ['posted_at', quotedPostDate],
       ])}>\n`;
       result += `      <content>\n        ${facetsToMarkdown(quotedRecord.text, (quotedRecord as any).facets)}\n      </content>\n`;
-      result += `      \n      Engagement: ${recordView.likeCount || 0} likes, ${recordView.repostCount || 0} reposts, ${recordView.replyCount || 0} replies\n`;
+      if (detail === 'full') {
+        result += `      \n      Engagement: ${recordView.likeCount || 0} likes, ${recordView.repostCount || 0} reposts, ${recordView.replyCount || 0} replies\n`;
+      }
       result += `    </quoted_post>\n`;
     }
   }
@@ -242,7 +265,9 @@ function formatPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
   result += formatEmbeds(post, '    ');
   
   // Add engagement metrics (without Posted: prefix)
-  result += `    \n    Engagement: ${post.likeCount} likes, ${post.repostCount} reposts, ${post.replyCount} replies${post.quoteCount ? ', ' + post.quoteCount + ' quotes' : ''}\n`;
+  if (detail === 'full') {
+    result += `    \n    Engagement: ${post.likeCount} likes, ${post.repostCount} reposts, ${post.replyCount} replies${post.quoteCount ? ', ' + post.quoteCount + ' quotes' : ''}\n`;
+  }
   
   // Close the post tag
   result += `  </post>`;
@@ -300,7 +325,7 @@ function formatEmbeds(post: AppBskyFeedDefs.PostView, indentation: string = ''):
 /**
  * Format replies for a post
  */
-function formatReplies(feedItems: AppBskyFeedDefs.FeedViewPost[], parentUri: string): string {
+function formatReplies(feedItems: AppBskyFeedDefs.FeedViewPost[], parentUri: string, detail: PostDetail = 'full'): string {
   // Find direct replies to this post
   const replies = feedItems.filter(item => 
     item.reply && 
@@ -316,7 +341,7 @@ function formatReplies(feedItems: AppBskyFeedDefs.FeedViewPost[], parentUri: str
   
   for (const reply of replies) {
     // Format the reply
-    const formattedReply = formatPost(reply);
+    const formattedReply = formatPost(reply, detail);
     
     // Indent the reply content to maintain hierarchy
     const indentedReply = formattedReply
@@ -327,7 +352,7 @@ function formatReplies(feedItems: AppBskyFeedDefs.FeedViewPost[], parentUri: str
     result += indentedReply;
     
     // Check for nested replies (recursive)
-    const nestedReplies = formatReplies(feedItems, reply.post.uri);
+    const nestedReplies = formatReplies(feedItems, reply.post.uri, detail);
     if (nestedReplies) {
       // Add indentation to nested replies
       const indentedNestedReplies = nestedReplies
@@ -380,7 +405,7 @@ function groupThreads(feedItems: AppBskyFeedDefs.FeedViewPost[]): {
 /**
  * Format a complete thread
  */
-function formatThread(feedItems: AppBskyFeedDefs.FeedViewPost[], rootUri: string): string {
+function formatThread(feedItems: AppBskyFeedDefs.FeedViewPost[], rootUri: string, detail: PostDetail = 'full'): string {
   // Find the root post
   const rootPost = feedItems.find(item => 
     item.post.uri === rootUri || 
@@ -396,10 +421,10 @@ function formatThread(feedItems: AppBskyFeedDefs.FeedViewPost[], rootUri: string
   }
   
   // Format the root post
-  let result = formatPost(rootPost);
+  let result = formatPost(rootPost, detail);
   
   // Add replies
-  const replies = formatReplies(feedItems, rootUri);
+  const replies = formatReplies(feedItems, rootUri, detail);
   if (replies) {
     // Insert before the closing post tag
     const lastPostTagIndex = result.lastIndexOf('</post>');
@@ -441,8 +466,11 @@ function formatTombstone(tombstone: any, indent: string = ''): string {
  * Preprocess multiple posts into the XML format defined in the spec.
  * Excluded posts (marked with __aiPrefExcluded) are rendered as tombstone placeholders
  * so feed order and thread structure remain consistent.
+ * `options.detail` selects how much of each post is rendered; it defaults to
+ * 'full' and applies to replies and quoted posts inside the same feed.
  */
-export function preprocessPosts(feedItems: AppBskyFeedDefs.FeedViewPost[]): string {
+export function preprocessPosts(feedItems: AppBskyFeedDefs.FeedViewPost[], options: FeedFormatOptions = {}): string {
+  const detail: PostDetail = options.detail ?? 'full';
   let result = '<posts>\n';
 
   // Separate normal items from tombstones for grouping, but track positions
@@ -474,14 +502,14 @@ export function preprocessPosts(feedItems: AppBskyFeedDefs.FeedViewPost[]): stri
 
   // Add thread posts with their original indices
   threadItems.forEach(({ item, index }) => {
-    const content = formatThread([item], Object.keys(threads).find(uri => threads.get(uri)?.includes(item)) || '');
+    const content = formatThread([item], Object.keys(threads).find(uri => threads.get(uri)?.includes(item)) || '', detail);
     if (content) allEntries.push({ type: 'post', content, orderIndex: index });
   });
 
   // Add standalone posts with their original indices
   standalone.forEach((item, i) => {
     const origIdx = feedItems.indexOf(item);
-    const content = formatPost(item);
+    const content = formatPost(item, detail);
     if (content) allEntries.push({ type: 'post', content, orderIndex: origIdx >= 0 ? origIdx : i });
   });
 
@@ -510,13 +538,13 @@ export function preprocessPosts(feedItems: AppBskyFeedDefs.FeedViewPost[]): stri
 }
 
 // For backward compatibility
-export function preprocessPost(feedItem: AppBskyFeedDefs.FeedViewPost): string {
-  return formatPost(feedItem);
+export function preprocessPost(feedItem: AppBskyFeedDefs.FeedViewPost, options: FeedFormatOptions = {}): string {
+  return formatPost(feedItem, options.detail ?? 'full');
 }
 
 // For backward compatibility
-export function formatFeed(feed: { items: AppBskyFeedDefs.FeedViewPost[] }): string {
-  return preprocessPosts(feed.items);
+export function formatFeed(feed: { items: AppBskyFeedDefs.FeedViewPost[] }, options: FeedFormatOptions = {}): string {
+  return preprocessPosts(feed.items, options);
 }
 
 /**

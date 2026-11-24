@@ -91,6 +91,36 @@ get-timeline-posts: { count: 20, type: "posts", cursor: "abc123..." }
 
 Post- and thread-fetching tools return text formatted for LLM consumption: structured `<posts>` / `<post>` / `<replies>` elements carrying attributes (`uri`, `bsky_url`, `author_handle`, `author_name`, `posted_at`, …), embedded links/images/video, quoted posts, and engagement counts. Reposts are wrapped in `<repost>`. The format is specified in [docs/post-format-spec.md](docs/post-format-spec.md); posts hidden by AI preferences are additionally replaced with tombstone placeholders so feed and thread order stays intact.
 
+### Detail Levels (`detail`)
+
+Reading a big feed is where most of this server's tokens go, and the two things a summary
+almost never needs are the `Engagement:` line and the `bsky_url` link. The six read-heavy
+list tools — `get-timeline-posts`, `search-posts`, `get-liked-posts`, `get-feed-posts`,
+`get-list-posts`, `get-user-posts` — take a `detail` parameter:
+
+- **`full`** (the default, and what every older client sees): every post rendered in full,
+  engagement counts and web links included.
+- **`compact`**: drops the `Engagement:` line and the `bsky_url` attribute from every post
+  and every quoted post. Nothing else changes — `uri`, `type`, author names and handles,
+  timestamps, `<content>`, embeds, `<repost>` nesting and `<excluded_post>` markers are
+  byte-identical to full mode.
+
+Measured on ordinary posts, that is about 107 characters per post — roughly a quarter to a
+third of the rendered payload, more on short posts. So a 100-post timeline read costs
+noticeably less, and thread grouping and hidden-post markers still behave the same.
+
+```
+get-timeline-posts: { count: 100, type: "posts", detail: "compact" }
+```
+
+`uri` is deliberately **kept** in compact mode: it is the argument `get-post-thread`,
+`create-reply` and `like-post` take, so a cheap read still leaves every post actionable.
+
+Thread reads (`get-post-thread`, `get-mention-context`) and `get-notifications` always
+render in full — they return one thread or one notification at a time, where pruning would
+save little and cost detail. See [docs/post-format-spec.md](docs/post-format-spec.md),
+section "Detail levels".
+
 ## Installation
 
 ### Installing Manually

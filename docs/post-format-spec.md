@@ -225,7 +225,7 @@ Each post includes:
 - `author_handle` - The handle of the post author
 - `posted_at` - Timestamp when the post was created
 - `reply_to` - at uri of post this is a reply to
-- ` engement` - likes, reposts, replies, quotes 
+- `engagement` - likes, reposts, replies, quotes 
 - Post content (wrapped in `<content>` tags)
 
 ### Repost Information
@@ -245,6 +245,36 @@ Embeds are contained in `<embed>` tags with a type attribute:
 
 ### Special Sections
 - `<quoted_post>` - For embedded/quoted posts, includes author attributes
+
+### Detail Levels: `full` vs `compact`
+
+The feed entry points (`preprocessPosts`, `formatFeed`, `preprocessPost`) accept an options
+object with a `detail` field, and the six read-heavy list tools expose it as a `detail`
+parameter (`get-timeline-posts`, `search-posts`, `get-liked-posts`, `get-feed-posts`,
+`get-list-posts`, `get-user-posts`). It selects how much of each post is rendered; it is
+not a different format.
+
+- **`full`** (default) — the whole format above, including the `bsky_url` attribute and the
+  `engagement` line of every post, repost and quoted post.
+- **`compact`** — the same walk with exactly two things removed from every post and every
+  `<quoted_post>`: the `bsky_url` attribute and the `Engagement:` line (and the blank line
+  that separated the content from it).
+
+Everything else is byte-identical between the two levels: the `<posts>` container, `uri`,
+`type`, `author_name`/`author_handle`, `posted_at`/`reposted_at`, `reply_to`, `parent_uri`,
+`<content>`, every `<embed>` variant, `<repost>` nesting, `<quoted_post>` nesting, the
+thread grouping, and `<excluded_post>` tombstones (which never carried engagement or a web
+URL in the first place, so they render the same either way). `uri` is kept on purpose in
+compact mode: it is the argument the post-level tools (`get-post-thread`, `create-reply`,
+`like-post`) take, so a pruned read stays actionable.
+
+Measured on ordinary posts, compact mode saves about 107 characters per post — roughly 26%
+of a long post's rendered payload and closer to a third for short posts.
+
+Thread rendering (`formatPostThread`, `formatPostThreadWithAiPrefs`, and therefore
+`get-post-thread` / `get-mention-context`) and `get-notifications` have no `detail`
+parameter: they return one thread or one notification per call, where the pruning would
+save little and cost detail.
 
 ### Hierarchical Structure
 - Replies can be nested in `<replies>` tags under their parent post
