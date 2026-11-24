@@ -40,6 +40,7 @@ async function main() {
     ["custom-endpoint", "node build/test/custom-endpoint/test-custom-endpoint.js"],
     ["pagination", "node build/test/pagination.test.js"],
     ["atproto-fetch", "node build/test/atproto-fetch.test.js"],
+    ["llm-preprocessor", "node build/test/llm-preprocessor.test.js"],
   ];
 
   const results = [];
