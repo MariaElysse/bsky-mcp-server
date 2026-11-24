@@ -7,7 +7,7 @@ const TIMELINE_SUMMARY_PROMPT = `
 I need you to get my Bluesky timeline and provide a summary of what people are talking about.
 
 Please follow these steps:
-1. Use the "get-timeline" tool to fetch my most recent posts (limit: 50)
+1. Use the "get-timeline-posts" tool to fetch my most recent posts (count: 50)
 2. Analyze the posts and identify common themes, topics, and discussions
 3. Create a concise summary of the main conversations happening
 4. Highlight any trending hashtags or notable discussions

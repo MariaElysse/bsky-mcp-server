@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-**bsky-mcp-server** is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects to [Bluesky](https://bsky.app/) via the ATProtocol. It exposes **28 tools** for LLM applications to interact with Bluesky — reading timelines, searching posts, managing follows, AI-preference filtering, mention handling, and more.
+**bsky-mcp-server** is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects to [Bluesky](https://bsky.app/) via the ATProtocol. It exposes **27 tools** for LLM applications to interact with Bluesky — reading timelines, searching posts, managing follows, AI-preference filtering, mention handling, and more.
 
-**Stack**: TypeScript (ESM, `nodenext` module resolution), Node.js 24, `@atproto/api`, `@modelcontextprotocol/sdk` (v1.7+), Zod for schema validation
+**Stack**: TypeScript (ESM, `nodenext` module resolution), Node.js (CI matrix: 22 and 24; local development on newer is fine), `@atproto/api`, `@modelcontextprotocol/sdk` (v1.7+), Zod for schema validation
 **Package manager**: pnpm 12.3.4 (`packageManager: pnpm@12.3.4`)
 **Build output**: `build/src/` (compiled JS), `build/test/` (compiled tests)
 **License**: MIT
@@ -14,17 +14,18 @@
 ```
 src/
   index.ts              # Main entry point — stdio MCP server, Bluesky auth, server bootstrap
-  tools.ts              # Core tool implementations (get-timeline-posts, search-posts, create-post, etc.) — ~2400 lines
+  tools.ts              # Core tool implementations (get-timeline-posts, search-posts, create-post, etc.) — ~2500 lines
   ai-preferences.ts     # AI preference reading/caching (community.lexicon.preference.ai records), batch checking, tombstone filtering
+  atproto-fetch.ts      # Hardened `fetch` for the AT Protocol: timeouts, retry/backoff, error descriptions
   link-preview.ts       # Link preview metadata fetching & thumbnail upload via cardyb
   llm-preprocessor.ts   # Post/thread formatting per docs/post-format-spec.md (Markdown, XML attributes)
   mention-store.ts      # Persistent mention deduplication store (JSON file with atomic writes)
   thread-context.ts     # Thread context retrieval and formatting for mention context tool
-  prompts.ts            # Prompt templates (mention reply generation)
-  resources.ts          # MCP resource definitions
+  prompts.ts            # MCP prompt (summarize-timeline) + mention-reply prompt/fallback text builders
+  resources.ts          # MCP resources (`bluesky://platform-info`, `bluesky://post-schema`); `resourcesList` mirrors them for the registration test
   utils.ts              # Shared utilities (cleanHandle, validateUri, response formatters, XML escaping)
-  scripts/              # Development/utility scripts
-test/                   # Test suites (plain Node.js ESM scripts, not Jest/Mocha)
+  scripts/              # Development/utility scripts (example-data generators, workspace git helper)
+test/                   # node:test suites compiled to build/test/ and run with `node --test`
 docs/                   # Project documentation (post-format-spec.md)
 .github/workflows/      # CI pipeline (GitHub Actions)
 ```
@@ -33,27 +34,31 @@ docs/                   # Project documentation (post-format-spec.md)
 
 | File | Purpose | Lines |
 |------|---------|-------|
-| `src/index.ts` | Server bootstrap, stdio transport, Bluesky auth, environment loading, MCP registration | ~260 |
-| `src/tools.ts` | All 26 tool handlers — pagination, AI preference filtering, link preview, thread context, rich text facets | ~2460 |
-| `src/ai-preferences.ts` | AI preference system: reads/writes `community.lexicon.preference.ai` records, caches per-DID (5 min TTL), batch-checking, tombstone replacement | ~350 |
-| `src/mention-store.ts` | Persistent mention deduplication store with JSON file backend, atomic writes, concurrency locking | ~450 |
+| `src/index.ts` | Server bootstrap, stdio transport, Bluesky auth, environment loading, MCP registration (2 of the 27 tools live here) | ~280 |
+| `src/tools.ts` | 25 of the 27 tool registrations via `registerTools()` — pagination, AI preference filtering, link preview, thread context, rich text facets | ~2500 |
+| `src/atproto-fetch.ts` | `createHardenedFetch()` — timeouts (`DEFAULT_REQUEST_TIMEOUT_MS = 15_000`), bounded retries with backoff (`DEFAULT_MAX_RETRIES = 2`), `describeAgentError()` | ~185 |
+| `src/ai-preferences.ts` | AI preference system: reads/writes `community.lexicon.preference.ai` records, per-DID cache (5 min TTL, 5000-entry LRU, negative results cached), batch checking, tombstone replacement | ~480 |
+| `src/mention-store.ts` | Persistent mention deduplication store: JSON file backend, atomic writes, lock file with token + staleness window (`LOCK_STALE_MS = 30s`), per-status retention (`DEFAULT_RETENTION`) | ~820 |
 | `src/thread-context.ts` | Thread context retrieval and formatting for mention context tool, AI-preference filtering | ~380 |
-| `src/utils.ts` | Shared helpers: `cleanHandle()`, `validateUri()`, `mcpSuccessResponse()`, `mcpErrorResponse()`, `escapeXml()` | ~350 |
-| `src/llm-preprocessor.ts` | Formats raw Bluesky API responses into LLM-friendly text (`docs/post-format-spec.md`), facet-to-markdown, thread formatting | ~1560 |
-| `src/link-preview.ts` | Fetches URL metadata via cardyb, uploads thumbnails to Bluesky | — |
-| `test/final-test.ts` | Orchestrator that runs all 12 test suites sequentially | ~70 |
+| `src/utils.ts` | Shared helpers: `cleanHandle()`, `validateUri()`, `mcpSuccessResponse()`, `mcpErrorResponse()`, `escapeXml()` | ~365 |
+| `src/llm-preprocessor.ts` | Formats raw Bluesky API responses into LLM-friendly text (`docs/post-format-spec.md`): one parameterized thread walker behind five named variations | ~1085 |
+| `src/link-preview.ts` | Fetches URL metadata via cardyb, uploads thumbnails to Bluesky | ~190 |
 | `test/pagination.test.ts` | 26 tests covering auto-fetch, cursor mode, hours mode, cursor-signal regressions | ~915 |
+| `test/register-tools.test.ts` | 20 tests over tool registration, annotations, error handling, agent resolution | ~845 |
+| `test/test-helpers.ts` | `runTests(cases)` — registers `[name, fn]` tuples with `node:test`; the only shared runner glue | ~30 |
 | `docs/post-format-spec.md` | The XML post/thread format every content tool emits | ~265 |
-| `tsconfig.json` | ES2020 target, nodenext modules, strict mode. `"exclude": []` — everything under `src/`, `scripts/`, `test/` must compile | — |
+| `tsconfig.json` | ES2020 target, nodenext modules, strict mode, `declaration`/`composite`. `"exclude": []` — everything under `src/`, `scripts/`, `test/` must compile | — |
 | `Dockerfile` | Build: install pnpm, install deps, compile TS (uses `node:lts-alpine`) | — |
 
 ## Tool Registration
 
 Tools are registered in two places:
-1. **`src/tools.ts`** — Core tools via `registerTools(server, getAgent)` helper function
-2. **`src/index.ts`** — Additional tools registered directly on the server instance
+1. **`src/tools.ts`** — the 25 core tools, via `registerTools(server, getAgent, getSearchAgent)`
+2. **`src/index.ts`** — the 2 account/config tools (`get-ai-preferences`, `set-ai-preference`), registered directly on the server instance
 
 Each tool takes a Zod schema for params and returns `mcpSuccessResponse()` or `mcpErrorResponse()`.
+
+Both agent arguments are **providers** (`() => Agent | null`), resolved on every tool call: tools are registered before login completes, and a re-login swaps the agent without re-registering anything. `getSearchAgent` defaults to `defaultSearchAgentProvider()` — one lazily created, unauthenticated `AtpAgent` on `https://api.bsky.app` — because the configured service host (blacksky.app) answers authenticated `searchPosts`/`searchActors` with 502 (upstream rsky#291). Only `search-posts` and `search-people` go through it; keep that routing behind the provider so tests can inject a fake and the workaround can be reverted in one place.
 
 To add a new tool:
 - If it's a core Bluesky API tool, add it to `src/tools.ts` inside `registerTools()`
@@ -69,7 +74,8 @@ All variables are for the single stdio mode — the server listens on no port an
 | `BLUESKY_IDENTIFIER` | Yes | Bluesky handle or DID |
 | `BLUESKY_APP_PASSWORD` | Yes | App password from Bluesky settings |
 | `BLUESKY_SERVICE_URL` | Yes | AT Protocol service URL (e.g., `https://bsky.social`) |
-| `BLUESKY_WEB_URL` | No | Web frontend base URL for link formatting (default: `https://bsky.app`) |
+| `BSKY_WEB_URL` | No | Web frontend base URL for link/post formatting (default: `https://bsky.app`). Read once at import in `llm-preprocessor.ts` and `utils.ts`, so it has to be set before the process starts — a `.env` entry works because dotenv runs during startup. |
+| `CARDYB_URL` | No | Link-preview extraction service (default: `https://cardyb.bsky.app`) |
 | `MENTION_STORE_PATH` | No | Custom path for mention deduplication JSON store |
 | `LOG_RESPONSES` | No | `true` writes tool diagnostics to stderr (stdout is MCP traffic) |
 | `ALLOW_AUTO_REPLY` | No | Must be `true` for `run-mention-monitor`'s `autoReply` to post replies; otherwise mentions stay `pending` and the refusal is reported |
@@ -81,55 +87,82 @@ pnpm install              # Install dependencies
 pnpm run build            # Compile TypeScript + create build/test/ dir
 pnpm run start            # Run the stdio MCP server
 pnpm run dev              # Build and run in one step
-pnpm run test             # Build, then run all 12 suites via test/final-test.ts
+pnpm run test             # Build, then: node --test --test-concurrency=1 --test-reporter=spec build/test/
 
 # Suites with their own package.json scripts:
-pnpm run test:get-thread    # build/test/tools/test-get-post-thread.js
-pnpm run test:url-converter # build/test/url-converter/test-url-converter.js
+pnpm run test:get-thread    # live thread-formatting suite (needs credentials)
+pnpm run test:url-converter # Bluesky URL → AT URI parsing
 
-# Any other suite runs straight from the compiled output, e.g.:
-node build/test/pagination.test.js
-node build/test/link-preview/test-link-preview.js
+# One suite on its own (each compiled file is a node:test file):
+node --test --test-reporter=spec build/test/pagination.test.js
+node --test --test-reporter=spec build/test/link-preview/test-link-preview.js
+
+# Run only cases whose name matches a pattern — the reason `--test` is worth it:
+node --test --test-name-pattern=tombstone build/test/
 
 # Example-data generators (rewrite test/*_examples_results.md):
 pnpm run process-posts
 pnpm run process-threads
 ```
 
-`test/tools/test-get-post-thread.ts` is the one suite the orchestrator does not run — it only runs through `pnpm run test:get-thread`.
+`test/tools/test-get-post-thread.ts` is a live suite: it logs in with the
+credentials in `.env`, fetches a real thread, and asserts the formatter output
+against `docs/post-format-spec.md`. It registers itself with a `skip` reason
+when `BLUESKY_IDENTIFIER`/`BLUESKY_APP_PASSWORD` are missing, so it reports as
+skipped in CI and runs for real on a workstation with a `.env`. Point a probe or
+test at the live account read-only: never call `create-post`, `create-reply`,
+`like-post`, `follow-user`, `unfollow-user`, or `run-mention-monitor` against it,
+and put any store path it touches under a scratch directory via
+`MENTION_STORE_PATH`.
 
 ## CI/CD
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `main`:
-1. Checkout repository
-2. Setup pnpm v12.3.4
-3. Setup Node.js v24
-4. `pnpm install`
+GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `main`, one job
+(`build-and-test`, `timeout-minutes: 15`, `fail-fast: false`) across a Node
+matrix of **22 and 24**:
+1. Checkout repository (`actions/checkout@v7`)
+2. Setup pnpm v12.3.4 (`pnpm/action-setup@v6`)
+3. Setup Node.js from the matrix, with pnpm caching (`actions/setup-node@v7`)
+4. `pnpm install --frozen-lockfile` — explicit, so a `package.json` edit without
+   a matching `pnpm-lock.yaml` commit fails the job instead of silently
+   re-resolving. Do not "fix" CI by dropping this flag; regenerate the lockfile.
 5. `pnpm run build`
 6. `pnpm run test`
 
-`pnpm install` already runs with `--frozen-lockfile` by default in CI (pnpm enables it whenever `CI` is set and a lockfile is present), so editing `package.json` without committing a matching `pnpm-lock.yaml` fails the build instead of silently re-resolving.
+There is no lint step: an ESLint config plus its devDependencies and a
+regenerated lockfile have to land together, which the workflow notes in place of
+the step. Scratch/verification artifacts (probes, baselines, generated output)
+go under `tmp/`, which is git-ignored — never at the repository root.
 
 ## Testing Conventions
 
-- Tests are plain Node.js ESM scripts in `test/` (not Jest/Mocha)
-- Each test file is self-contained and runs against the built output in `build/test/`
-- The orchestrator (`test/final-test.ts`) runs all test suites sequentially, printing per-suite pass/fail and a summary
+- Tests use the built-in **`node:test`** runner — no Jest, Mocha, or test framework in `package.json`.
+- Every file under `test/` is a self-contained ESM module compiled into `build/test/` and discovered by `node --test build/test/`. There is no orchestrator file to keep in sync; adding a suite means adding a file.
+- Suites declare cases as `[name, fn]` tuples and hand them to `runTests()` from `test/test-helpers.ts`, which registers each with `test()` and **awaits** the lot. The await matters: suites create temp directories above the call and delete them below it, and the runner executes registered cases while the module is still evaluating, so a helper that returned immediately would let teardown race the cases (it produced 76 `ENOENT` failures the first time it was tried).
+- Cases registered through the helper are attributed by the reporter to `test-helpers.ts` rather than to the suite file. That is cosmetic; the case names are the suite's own.
+- `--test-concurrency=1` in `pnpm run test` is deliberate: several suites mutate process-global state (the AI-preference cache) and create stores under predictable temp paths, so files run one at a time. A full run is ~13 s.
+- Node ≥ 23 type-strips the `*.d.ts` files that `composite`/`declaration` emits next to the compiled tests and lists each as a test file with no cases, so the summary reports a handful of entries more than the real case count (311 vs 305 today). Harmless.
+- Prefer `test()` case names that read as behaviour, and put regression tests in the suite that already owns the code path.
 
-**12 test suites (236 tests total — `pnpm run test` prints the live counts):**
+**14 offline suites, 304 cases, plus 1 live suite (`node --test` prints the live counts):**
 
-1. `register-tools` — tool registration, error handling, agent resolution (19 tests)
-2. `url-converter` — Bluesky URL to AT URI parsing (5 tests)
-3. `link-preview` — cardyb extraction, thumbnail upload, error cases (11 tests)
-4. `ai-preferences` — flatten/unflatten, batch check, filter, integration with tools (35 tests)
-5. `ai-preferences-tombstone` — tombstone replacement, thread filtering, XML format, attribute escaping (21 tests)
-6. `mention-store` — CRUD, atomic writes, concurrency, cleanup, persistence, `skipped` status (47 tests)
-7. `thread-context` — thread fetching, participant extraction, formatting (20 tests)
-8. `mention-context` — mention tool, dedup, AI filtering (14 tests)
-9. `mention-monitor` — poll, auto-reply, dedup across runs (15 tests)
-10. `create-reply` — reply creation, URI validation, facets, dedup (14 tests)
-11. `custom-endpoint` — custom Bluesky frontend URL parsing (9 tests)
-12. `pagination` — auto-fetch, cursor mode, hours mode, cursor-signal regressions (26 tests)
+| Suite | Cases | Covers |
+|---|---|---|
+| `register-tools` | 20 | tool registration, MCP annotations, error handling, agent resolution |
+| `url-converter/test-url-converter` | 5 | Bluesky URL → AT URI parsing, custom frontends |
+| `link-preview/test-link-preview` | 11 | cardyb extraction, thumbnail upload, error cases |
+| `ai-preferences` | 43 | flatten/unflatten, raw-record guard, cache (TTL, LRU, negative), batch check, filtering through the tools |
+| `ai-preferences-tombstone` | 22 | tombstone replacement, thread filtering, XML format, attribute escaping |
+| `mention-store` | 58 | CRUD, atomic writes, lock token/staleness, per-status retention, concurrency, persistence, `skipped` |
+| `thread-context` | 20 | thread fetching, participant extraction, formatting |
+| `mention-context` | 14 | mention tool, dedup, AI filtering |
+| `mention-monitor` | 16 | poll, auto-reply gate, dedup across runs |
+| `create-reply` | 14 | reply creation, URI validation, facets, dedup |
+| `custom-endpoint/test-custom-endpoint` | 9 | custom Bluesky frontend URL parsing |
+| `pagination` | 26 | auto-fetch, cursor mode, hours mode, cursor-signal regressions |
+| `atproto-fetch` | 15 | timeouts, retry/backoff, error descriptions |
+| `llm-preprocessor` | 31 | post/thread/embed/feed formatting against `docs/post-format-spec.md` |
+| `tools/test-get-post-thread` | 1 | **live**: a real thread rendered through the format spec; self-skips without credentials |
 
 ## AI Preference System
 
@@ -138,13 +171,13 @@ The AI preference system filters content based on user-configured preferences st
 **Categories:** `inference`, `training`, `syntheticContent`, `embedding`
 
 **How it works:**
-1. **Reading**: `fetchAiPreferences(agent, did)` fetches the user's preference record
-2. **Caching**: Results cached per-DID for 5 minutes (`PREF_CACHE_TTL_MS = 5 * 60 * 1000`)
-3. **Batch checking**: `batchCheckAiPreferences(agent, dids)` checks multiple DIDs in one API call
-4. **Filtering**: `filterPostsByAiPreferences(posts, allowedMap)` replaces denied posts with **tombstones** (preserving feed order)
-5. **Categories**: `inference`, `training` — read preferences; `syntheticContent`, `embedding` — display preferences
+1. **Reading**: `fetchAiPreferences(agent, did)` fetches and flattens one author's record (`isAiPreferencesRecordRaw` guards the raw lexicon shape, `flattenAiPreferences`/`unflattenAiPreferences` convert between the record and the flat `{inference, training, syntheticContent, embedding}` view).
+2. **Caching**: lookups are memoized per DID in a process-global cache — `PREF_CACHE_TTL_MS = 5 * 60 * 1000` (5 minutes), `MAX_PREF_CACHE_ENTRIES = 5000` with LRU eviction. Negative results are cached too (`no-record`, `lookup-failed`), so an author with no preference record costs one lookup per TTL window, not one per feed page. Tests that exercise this path call `clearPreferenceCache()` first; `--test-concurrency=1` keeps files from leaking the cache into each other.
+3. **Batch checking**: `batchCheckAiPreferenceRecords(agent, dids, prefs = READ_PREFERENCES)` returns `Map<DID, AiPreferenceCheck>` — the verdict, the author's record, and the denying categories — in a single pass, deduplicating DIDs and fetching uncached ones in parallel batches of 20. `batchCheckAiPreferences(agent, dids)` is the thin `Map<DID, boolean>` wrapper; use the records API whenever tombstone metadata is needed so there is no second fetch.
+4. **Filtering**: `filterPostsByAiPreferences(posts, allowedDids, deniedRecords?)` replaces denied posts with **tombstones** (`AiPreferenceTombstone`) in place, preserving feed/thread order, and returns `{filtered, skippedCount}`. Threads go through `getDidsFromThread()` + `filterThreadByAiPreferences()`.
+5. **Categories**: `inference`, `training` — read preferences (`READ_PREFERENCES`, what filtering keys on); `syntheticContent`, `embedding` — display preferences.
 
-When modifying content-fetching tools, ensure they respect AI preferences via `batchCheckAiPreferences()` and `filterPostsByAiPreferences()`. AI preference filtering is **mandatory**: any tool that fetches user content (posts, timelines, searches, likes, notifications) must filter by AI preferences. No exceptions.
+When modifying content-fetching tools, ensure they respect AI preferences via `batchCheckAiPreferenceRecords()` (or the boolean wrapper) and `filterPostsByAiPreferences()`. AI preference filtering is **mandatory**: any tool that fetches user content (posts, timelines, searches, likes, notifications) must filter by AI preferences. No exceptions.
 
 ## Architecture & Patterns
 
@@ -155,23 +188,26 @@ When modifying content-fetching tools, ensure they respect AI preferences via `b
 4. **Tool handlers**: All tools resolve the agent lazily via `() => agent` provider pattern
 
 ### Pagination (Cursor-Based)
-6 tools support cursor-based pagination: `get-timeline-posts`, `get-feed-posts`, `get-list-posts`, `get-user-posts`, `get-liked-posts`, `get-notifications`
+7 tools expose a `cursor` parameter: `get-timeline-posts`, `get-notifications`, `get-liked-posts`, `get-feed-posts`, `get-list-posts`, `get-user-posts`, `get-follows`. (`get-followers` fetches one page and does not surface a cursor — don't add pagination as a drive-by.)
 
 - **Auto-fetch mode** (no cursor): fetches pages sized to what is still needed (`Math.min(100, count - fetched)`), stopping when `count` is satisfied or the API stops returning a cursor
-- **Cursor mode** (cursor provided): fetches single page starting from cursor, returns up to `count` posts
-- **Cursor signal**: every pagination tool appends `[More posts available — pass cursor="…" to continue.]` whenever the API returned a cursor and the call produced results — **including when `count` was already satisfied**, so a caller can always resume instead of silently losing everything past the first page
-- **Hours-based mode** (`type: "hours"`): ignores cursor, fetches fresh results for time window, and therefore never advertises a cursor
-- Max total posts capped at 500 (`MAX_TOTAL_POSTS`)
+- **Cursor mode** (cursor provided): fetches a single page starting from that cursor, returning up to `count` items
+- **Cursor signal**: every paginating tool appends a `pass cursor="…" to continue.` line whenever the API returned a cursor and the call produced results — **including when `count` was already satisfied**, so a caller can always resume instead of silently losing everything past the first page. The wording is per-tool (`[More timeline posts available — …]`, `More pages available — pass cursor=…` for follows), so match the local phrasing instead of unifying it.
+- **Hours-based mode** (`type: "hours"`, timeline/feed/list): ignores cursor, fetches fresh results for the time window, and therefore never advertises a cursor
+- Multi-page handlers declare a local `const MAX_TOTAL_POSTS = 500` guard (timeline, feed-posts, list-posts, user-posts); it is not one shared constant
 - Default count/limit: 20
 
 ### Mention Deduplication Store
 
-`src/mention-store.ts` tracks processed mentions by AT URI with statuses `pending`, `replied`, `failed`, `skipped`:
+`src/mention-store.ts` tracks processed mentions by AT URI with statuses `pending`, `replied`, `failed`, `skipped`. `getMentionStore()` returns the singleton for `MENTION_STORE_PATH` (tests call `resetMentionStoreSingleton()` between cases); writes go through a temp file + rename so a crash never leaves a half-written store.
 
 - `isHandled()` treats `pending` and `skipped` as **non-terminal**; `replied` and `failed` are terminal
 - `skipped` is for policy skips (author opted out of AI inference/training): the mention is re-visited on a later poll, because preferences can flip
 - Never record a policy opt-out as `failed` — that permanently suppresses the mention
 - Display code reads `entry.reason` for skips (`entry.error` is for failures)
+- **Locking**: writers take a lock file that records a token and pid. It is only stolen when the holder is demonstrably gone — the recorded pid no longer exists on this host, or the lock has gone untouched for `LOCK_STALE_MS = 30 * 1000`. Acquire gives up after `MAX_WRITE_ATTEMPTS` (50) × `WRITE_RETRY_MS` (20 ms) = 1 s, so a slow-but-live holder keeps its lock while a crashed one stops blocking the store within half a minute.
+- **Retention**: entries age out per status via `DEFAULT_RETENTION` — `replied` 30 days (that entry *is* the duplicate-reply guard, so it gets the longest window), `failed` 7 days, `pending` 7 days, `skipped` 24 hours. Pruning is lazy, never `setInterval`: one pass when the store is created (`startRetentionPrune()`, wired from `getMentionStore()`) plus a write-path `retentionTick()` that runs at most once per `RETENTION_PRUNE_INTERVAL_MS` (1 h) per store path and never fails a mention write.
+- The flat-window `cleanup(maxAgeMs)` (default 24 h, same age for every status) exists for callers and tests, but the live path prunes by retention instead — a uniform window would age out old `replied` guards and let the same mention get answered twice.
 
 ### Response Formatting
 - `llm-preprocessor.ts` implements the post/thread format specified in `docs/post-format-spec.md`
@@ -204,9 +240,9 @@ When modifying content-fetching tools, ensure they respect AI preferences via `b
 2. Implement the handler with proper error handling via try/catch + `mcpErrorResponse()`
 3. Add AI preference filtering if fetching user content (call `batchCheckAiPreferences()` + `filterPostsByAiPreferences()`)
 4. Update README.md with tool description and categorization
-5. Add tests in `test/` (or add to existing test suite)
-6. Add test runner entry in `test/final-test.ts` if it's a new suite
-7. Run `pnpm run test` — all 12 suites must pass
+5. Add tests in `test/` (or add cases to an existing suite) — a new file under `test/` is discovered automatically by `node --test build/test/`; there is no runner file to register it in
+6. If the tool paginates, append the cursor signal and cover it in `test/pagination.test.ts`
+7. Run `pnpm run test` — the build and every suite must be green (the summary currently reports 311 entries: 305 real cases plus the zero-test `.d.ts` files Node lists)
 
 ## Transport
 
