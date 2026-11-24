@@ -3,7 +3,7 @@
  * the agent was mentioned, with AI preference filtering.
  */
 
-import { AtpAgent } from '@atproto/api';
+import { Agent } from '@atproto/api';
 import {
   batchCheckAiPreferences,
   filterThreadByAiPreferences as aiPrefFilterThread,
@@ -147,7 +147,7 @@ export function formatThreadForReply(
  * preference filtering. Returns formatted context suitable for LLM consumption.
  */
 export async function fetchThreadContext(
-  agent: AtpAgent,
+  agent: Agent,
   postUri: string
 ): Promise<ThreadContextResult> {
   try {
@@ -230,7 +230,7 @@ function buildEmptyResult(mentionedPostUri: string): ThreadContextResult {
  * Fetches a full thread context and returns metadata about excluded posts.
  */
 export async function fetchThreadContextWithMeta(
-  agent: AtpAgent,
+  agent: Agent,
   postUri: string
 ): Promise<{ thread: string; excludedCount: number }> {
   try {

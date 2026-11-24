@@ -14,6 +14,7 @@ import {
   unflattenAiPreferences,
   type AiPreferencesRecord,
   type AiPreferencesRecordRaw,
+  isAiPreferencesRecordRaw,
 } from './ai-preferences.js';
 import { registerTools } from './tools.js';
 
@@ -158,8 +159,13 @@ server.tool(
       }
 
       // @atproto/api getRecord returns { uri, cid, value: { ...actual data... } }.
-      // Extract the actual record before flattening.
-      const rawRecord = (response.data as any).value as AiPreferencesRecordRaw;
+      // The lexicon is not in the generated client, so `value` is only
+      // Record<string, unknown> there; the guard narrows it to the shape
+      // flattenAiPreferences expects. A record that does not match is treated
+      // as "no preferences set" rather than trusted.
+      const rawRecord = isAiPreferencesRecordRaw(response.data.value)
+        ? response.data.value
+        : null;
       const record = flattenAiPreferences(rawRecord);
 
       // Build a human-readable summary
@@ -205,7 +211,7 @@ server.tool(
       const rkey = AI_PREFS_RKEY;
 
       // First, read the existing record to preserve other categories
-      let existingRaw: AiPreferencesRecordRaw = {};
+      let existingRaw: AiPreferencesRecordRaw | null = null;
       try {
         const getResponse = await currentAgent.com.atproto.repo.getRecord({
           repo: did,
@@ -214,7 +220,9 @@ server.tool(
         });
         if (getResponse.success) {
           // @atproto/api getRecord returns { uri, cid, value: {...} }. Extract the actual record.
-          existingRaw = (getResponse.data as any).value as AiPreferencesRecordRaw;
+          existingRaw = isAiPreferencesRecordRaw(getResponse.data.value)
+            ? getResponse.data.value
+            : null;
         }
       } catch {
         // No existing record — that's fine, we'll create one
@@ -225,14 +233,14 @@ server.tool(
       const flatUpdated: Record<string, string> = { ...flatExisting };
       flatUpdated[category] = value;
 
-      const nestedRecord = unflattenAiPreferences(flatUpdated as any);
+      const nestedRecord = unflattenAiPreferences(flatUpdated);
 
       // Write back via putRecord in the nested API format
       await currentAgent.com.atproto.repo.putRecord({
         repo: did,
         collection,
         rkey,
-        record: { ...nestedRecord } as any,
+        record: { ...nestedRecord },
       });
 
       // Drop the per-DID preference cache so the new settings take effect

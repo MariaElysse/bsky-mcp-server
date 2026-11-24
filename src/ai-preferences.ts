@@ -55,7 +55,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * guard, and callers treat a failed guard as "no record", so a malformed
  * record never throws and never denies content.
  */
-function isAiPreferencesRecordRaw(value: unknown): value is AiPreferencesRecordRaw {
+export function isAiPreferencesRecordRaw(value: unknown): value is AiPreferencesRecordRaw {
   if (!isPlainObject(value)) return false;
 
   const preferences = value.preferences;
@@ -77,8 +77,8 @@ function boolToAllowDeny(allow: boolean | undefined): 'allow' | 'deny' {
 }
 
 /** Extract the flat allow/deny record from the nested API response. */
-export function flattenAiPreferences(record: AiPreferencesRecordRaw): AiPreferencesRecord {
-  const p = record.preferences ?? {};
+export function flattenAiPreferences(record: AiPreferencesRecordRaw | null): AiPreferencesRecord {
+  const p = record?.preferences ?? {};
   return {
     training: boolToAllowDeny(p.training?.allow),
     inference: boolToAllowDeny(p.inference?.allow),

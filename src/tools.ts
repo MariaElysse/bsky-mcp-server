@@ -1,6 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { AtpAgent, Agent, RichText } from "@atproto/api";
+import {
+  AtpAgent,
+  Agent,
+  RichText,
+  type AppBskyFeedDefs,
+  type AppBskyFeedGetPostThread,
+  type AppBskyNotificationListNotifications,
+} from "@atproto/api";
 import {
   cleanHandle,
   formatSummaryText,
@@ -38,6 +45,23 @@ const ANNOTATE_DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idemp
  * Collects all DIDs from posts, batch-checks them, replaces denied ones with
  * tombstone placeholders (preserving feed order), and returns formatted results.
  */
+/**
+ * Read the strong ref a post record points at when the post is a reply.
+ * `PostView.record` is an open record (`{ [k: string]: unknown }`), so the
+ * generated client cannot type `record.reply` — narrowing it here keeps the
+ * reply-parenting code free of `any` and silently falls back to treating the
+ * post as a top-level post when the ref is missing or malformed.
+ */
+function readReplyRoot(record: unknown): { uri: string; cid: string } | undefined {
+  if (typeof record !== "object" || record === null || Array.isArray(record)) return undefined;
+  const reply = (record as Record<string, unknown>).reply;
+  if (typeof reply !== "object" || reply === null || Array.isArray(reply)) return undefined;
+  const root = (reply as Record<string, unknown>).root;
+  if (typeof root !== "object" || root === null || Array.isArray(root)) return undefined;
+  const { uri, cid } = root as Record<string, unknown>;
+  return typeof uri === "string" && typeof cid === "string" ? { uri, cid } : undefined;
+}
+
 async function filterPostsByAiPrefs(
   agent: any,
   posts: any[],
@@ -54,7 +78,7 @@ async function filterPostsByAiPrefs(
   // One pass over the authors: each check carries the verdict, the author's
   // record and the denied categories, so a denied post never costs a second
   // round-trip just to label its tombstone.
-  const checks = await batchCheckAiPreferenceRecords(agent as any, Array.from(didSet));
+  const checks = await batchCheckAiPreferenceRecords(agent, Array.from(didSet));
   const allowedMap = new Map<string, boolean>();
   const deniedRecords = new Map<string, AiPreferencesRecord>();
   for (const [did, check] of checks) {
@@ -346,7 +370,7 @@ export function registerTools(
         const notifDids = Array.from(new Set(
           finalNotifications.map(n => n?.author?.did).filter(Boolean)
         ));
-        const allowedMap = await batchCheckAiPreferences(agent as any, notifDids);
+        const allowedMap = await batchCheckAiPreferences(agent, notifDids);
         const filteredNotifications = finalNotifications.filter(n => {
           const authorDid = n?.author?.did;
           if (!authorDid) return true;
@@ -440,7 +464,8 @@ export function registerTools(
               throw new Error('Could not get post information');
             }
 
-            const threadPost = cidResponse.data.thread as any;
+            // Narrowed by the CID lookup above: a missing post threw already.
+            const threadPost = cidResponse.data.thread as AppBskyFeedDefs.ThreadViewPost;
             const parentPost = threadPost.post;
             const parentCid = parentPost.cid;
             const parentRecord = parentPost.record;
@@ -451,9 +476,10 @@ export function registerTools(
             // the Bluesky web UI.
             let rootUri: string;
             let rootCid: string;
-            if (parentRecord.reply) {
-              rootUri = parentRecord.reply.root.uri;
-              rootCid = parentRecord.reply.root.cid;
+            const parentReplyRoot = readReplyRoot(parentRecord);
+            if (parentReplyRoot) {
+              rootUri = parentReplyRoot.uri;
+              rootCid = parentReplyRoot.cid;
             } else {
               rootUri = replyTo;
               rootCid = parentCid;
@@ -620,7 +646,7 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
 
         // Enforce AI preferences on thread replies (requested post always shown for context)
         const rootDid = postUri.did;
-        const allowedMap = await batchCheckAiPreferences(agent as any, [rootDid]);
+        const allowedMap = await batchCheckAiPreferences(agent, [rootDid]);
         const filteredThread = filterThreadByAiPreferences(response.data.thread, allowedMap);
 
         if (!filteredThread) {
@@ -958,8 +984,9 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
           return mcpErrorResponse("Failed to get post information.");
         }
 
-        // Type assertion to tell TypeScript this is a post
-        const threadPost = response.data.thread as any;
+        // getPostThread also returns notFound/blocked shapes; this handler has
+        // already established the post exists, so narrow to the view it uses.
+        const threadPost = response.data.thread as AppBskyFeedDefs.ThreadViewPost;
         const post = threadPost.post;
         const cid = post.cid;
 
@@ -1889,7 +1916,8 @@ ${follower.indexedAt ? `Following since: ${new Date(follower.indexedAt).toLocale
         }
 
         // Get the post's CID
-        const threadPost = response.data.thread as any;
+        // The `$type` check above rules out notFound/blocked threads.
+        const threadPost = response.data.thread as AppBskyFeedDefs.ThreadViewPost;
         const post = threadPost.post;
         const cid = post.cid;
 
@@ -1998,9 +2026,9 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
         const errors: string[] = [];
 
         // Fetch notifications filtered to mentions only
-        let response: any;
+        let response: AppBskyNotificationListNotifications.Response;
         try {
-          response = await (agent as any).app.bsky.notification.listNotifications({
+          response = await agent.app.bsky.notification.listNotifications({
             limit: maxMentions,
             reasons: ['mention']
           });
@@ -2046,7 +2074,7 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
           let aiPrefDenied = false;
           if (notifAuthorDid && autoReplyEnabled) {
             try {
-              const allowedMap = await batchCheckAiPreferences(agent as any, [notifAuthorDid]);
+              const allowedMap = await batchCheckAiPreferences(agent, [notifAuthorDid]);
               if (!allowedMap.get(notifAuthorDid)) {
                 aiPrefDenied = true;
               }
@@ -2089,19 +2117,22 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
               let rootCid: string;
 
               try {
-                const threadRes = await (agent as any).app.bsky.feed.getPostThread({ uri: notifUri });
+                const threadRes = await agent.app.bsky.feed.getPostThread({ uri: notifUri });
                 if (threadRes?.success && threadRes.data?.thread) {
-                  const post = threadRes.data.thread.post || {};
-                  parentCid = post.cid || '';
-                  const record = post.record || {};
+                  // getPostThread also returns notFound/blocked shapes; a
+                  // notification always points at a real post, so read the view.
+                  const threadView = threadRes.data.thread as AppBskyFeedDefs.ThreadViewPost;
+                  const post = threadView.post;
+                  parentCid = post?.cid || '';
 
                   // If the mentioning post is itself a reply, use its root; otherwise it IS the root
-                  if (record.reply && record.reply.root) {
-                    rootUri = record.reply.root.uri;
-                    rootCid = record.reply.root.cid;
+                  const mentionReplyRoot = readReplyRoot(post?.record);
+                  if (mentionReplyRoot) {
+                    rootUri = mentionReplyRoot.uri;
+                    rootCid = mentionReplyRoot.cid;
                   } else {
                     rootUri = notifUri;
-                    rootCid = post.cid || '';
+                    rootCid = post?.cid || '';
                   }
                 } else {
                   parentCid = notification.cid || '';
@@ -2198,9 +2229,9 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
       }
 
       try {
-        let response: any;
+        let response: AppBskyNotificationListNotifications.Response;
         try {
-          response = await (agent as any).app.bsky.notification.listNotifications({
+          response = await agent.app.bsky.notification.listNotifications({
             limit,
             reasons: ['mention']
           });
@@ -2239,7 +2270,7 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
             }
 
             // Fetch thread context
-            const threadContext = await fetchThreadContext(agent as any, notifUri);
+            const threadContext = await fetchThreadContext(agent, notifUri);
             const rawThread = threadContext.rawThread || threadContext.thread;
 
             // Extract participant DIDs (including mention notification author)
@@ -2252,7 +2283,7 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
             ]));
 
             // Batch-check AI preferences
-            const allowedMap = await batchCheckAiPreferences(agent as any, dids);
+            const allowedMap = await batchCheckAiPreferences(agent, dids);
 
             // Format thread with AI preferences (allowRequestedPost = false so author denials are respected)
             let formattedThread = '';
@@ -2362,7 +2393,7 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
         }
 
         // Fetch the post via getPostThread to resolve parent/root CIDs correctly
-        let threadResp: any;
+        let threadResp: AppBskyFeedGetPostThread.Response;
         try {
           threadResp = await agent.app.bsky.feed.getPostThread({
             uri,
@@ -2379,7 +2410,8 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
           return mcpErrorResponse(`Post not found or inaccessible: ${uri}`);
         }
 
-        const threadPost = threadResp.data.thread as any;
+        // Narrowed to the view shape; `post?.` still guards a malformed record.
+        const threadPost = threadResp.data.thread as AppBskyFeedDefs.ThreadViewPost;
         const parentCid = threadPost.post?.cid;
         if (!parentCid) {
           await mentionStore.markFailed(uri, "Could not resolve post CID");
@@ -2391,9 +2423,10 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
         const parentRecord = threadPost.post?.record;
         let rootUri: string;
         let rootCid: string;
-        if (parentRecord?.reply) {
-          rootUri = parentRecord.reply.root.uri;
-          rootCid = parentRecord.reply.root.cid;
+        const parentReplyRoot = readReplyRoot(parentRecord);
+        if (parentReplyRoot) {
+          rootUri = parentReplyRoot.uri;
+          rootCid = parentReplyRoot.cid;
         } else {
           rootUri = uri;
           rootCid = parentCid;
@@ -2403,7 +2436,7 @@ ${like.indexedAt ? `Liked at: ${new Date(like.indexedAt).toLocaleString()}` : ''
         const targetAuthorDid = threadPost.post?.author?.did;
         if (targetAuthorDid) {
           try {
-            const allowedMap = await batchCheckAiPreferences(agent as any, [targetAuthorDid]);
+            const allowedMap = await batchCheckAiPreferences(agent, [targetAuthorDid]);
             if (allowedMap.get(targetAuthorDid) === false) {
               // Not a failure: record a skip so the mention stays reconsiderable if the
               // author later allows inference, instead of being written off by isHandled().
