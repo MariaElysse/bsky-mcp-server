@@ -1375,14 +1375,14 @@ export const CASES: Case[] = [
     ],
   },
   {
-    name: "detail: full is the default and compact renders strictly less for the same feed",
+    name: "detail: a formatter call with no options renders the full format; compact renders strictly less",
     run: (m) => {
       const items = [feedItem({ uri: uriOf(ALICE, "c8"), likeCount: 5, indexedAt: "2021-08-04T13:30:00.000Z" })];
       const implicit = m.formatFeed({ items });
       const full = m.formatFeed({ items }, { detail: "full" });
       const compact = m.formatFeed({ items }, { detail: "compact" });
       return [
-        `defaultIsFull:${implicit === full}`,
+        `formatterDefaultIsFull:${implicit === full}`,
         `compactDiffers:${implicit !== compact}`,
         `fullHasEngagement:${full.includes("Engagement:")}`,
         `compactHasEngagement:${compact.includes("Engagement:")}`,
@@ -1394,7 +1394,7 @@ export const CASES: Case[] = [
       ].sort().join(" ");
     },
     expected: [
-      "compactDiffers:true compactHasEngagement:false compactHasUrl:false compactIsShorter:true compactKeepsUri:true defaultIsFull:true emptyFeedIsUnchanged:true fullHasEngagement:true fullHasUrl:true",
+      "compactDiffers:true compactHasEngagement:false compactHasUrl:false compactIsShorter:true compactKeepsUri:true emptyFeedIsUnchanged:true formatterDefaultIsFull:true fullHasEngagement:true fullHasUrl:true",
     ],
   },
 ];

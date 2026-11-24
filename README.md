@@ -104,39 +104,53 @@ almost never needs are the `Engagement:` line and the `bsky_url` link. Seven too
 `detail` parameter — the six read-heavy post lists (`get-timeline-posts`, `search-posts`,
 `get-liked-posts`, `get-feed-posts`, `get-list-posts`, `get-user-posts`) and
 `get-follows` — and all seven declare it from one schema, so the choices are always
-`"full"` or `"compact"` and `"full"` is always the default. What each level leaves out
-belongs to the payload, and each tool's own description says so.
+`"full"` or `"compact"` and **`"compact"` is always the default**. What each level leaves
+out belongs to the payload, and each tool's own description says so. Compact is the default
+because it is what a large read needs, and it costs nothing you have to have in order to act
+on what the response shows: every element it renders still carries the identifier the next
+call takes, and everything it leaves out is either derivable or one call away.
 
 For the six post lists:
 
-- **`full`** (the default): every post rendered in full, engagement counts and web links
-  included.
-- **`compact`**: drops the `Engagement:` line and the `bsky_url` attribute from every post
-  and every quoted post. Nothing else changes — `uri`, `type`, author names and handles,
-  timestamps, `<content>`, embeds, `<repost>` nesting, `<replies>` nesting and
+- **`compact`** (the default): drops the `Engagement:` line and the `bsky_url` attribute from
+  every post and every quoted post. Nothing else changes — `uri`, `type`, author names and
+  handles, timestamps, `<content>`, embeds, `<repost>` nesting, `<replies>` nesting and
   `<excluded_post>` markers are byte-identical to full mode.
+- **`full`** (`detail: "full"`): every post rendered in full, engagement counts and web links
+  included.
 
-Measured on ordinary posts, that is about 107 characters per post — roughly a quarter to a
-third of the rendered payload, more on short posts. So a 100-post timeline read costs
-noticeably less, and thread grouping and hidden-post markers still behave the same.
+Measured on ordinary posts, those two drops are about 107 characters per post — roughly a
+quarter to a third of the rendered payload, more on short posts. So a 100-post timeline read
+costs noticeably less, and thread grouping and hidden-post markers still behave the same.
 
 ```
-get-timeline-posts: { count: 100, type: "posts", detail: "compact" }
+get-timeline-posts: { count: 100, type: "posts" }                     # compact, the default
+get-timeline-posts: { count: 100, type: "posts", detail: "full" }     # counts and links back
 ```
 
-`uri` is deliberately **kept** in compact mode: it is the argument `get-post-thread`,
-`create-reply` and `like-post` take, so a cheap read still leaves every post actionable.
+**Nothing shown is a dead end.** `uri` is kept in compact mode on purpose: it is the
+argument `get-post-thread`, `create-reply` and `like-post` take, and it stays on quoted posts
+and on `<excluded_post>` markers as well. Replies keep `reply_to`, and a repost names who
+reposted it. What is dropped is recoverable — `bsky_url` is `BSKY_WEB_URL` + the author's
+handle + the rkey of the `uri`, and the counts come back either from `detail: "full"` or from
+a thread read, which always renders them.
 
-`get-follows` renders users rather than posts, so its two levels read differently: `full`
-(the default) returns one block per follow — display name, handle, DID, the follow record
-URI, bio and follower/following/post counts — while `compact` returns one line per follow,
-roughly 80 bytes each, which is what a list of thousands wants. The bracketed
-`at://…app.bsky.graph.follow/…` on each compact line is the follow record, ready to hand to
-`unfollow-user`.
+`get-follows` renders users rather than posts, so its two levels read differently: `compact`
+(the default) returns one line per follow — handle, display name, DID and, for your own
+follows, the bracketed `at://…app.bsky.graph.follow/…` follow record, ready to hand to
+`unfollow-user` — roughly 80 bytes each, which is what a list of thousands wants. `detail:
+"full"` returns a block per follow with display name, handle, DID, follow record URI, bio and
+follower/following/post counts.
 
-> **Breaking change:** `get-follows` used to default to `detail: "compact"`. It now defaults
-> to `"full"` like every other tool that has this parameter. Pass `detail: "compact"` to get
-> the previous one-line-per-follow output.
+> **Breaking change:** all seven tools that take `detail` now default to `"compact"`. A
+> post-list read no longer includes engagement counts or `bsky_url`, and `get-follows`
+> returns one line per follow instead of a block per user. Pass `detail: "full"` for the
+> previous output.
+
+Thread reads (`get-post-thread`, `get-mention-context`) and `get-notifications` always
+render in full — they return one thread or one notification at a time, where pruning would
+save little and cost detail. See [docs/post-format-spec.md](docs/post-format-spec.md),
+section "Detail Levels: `full` vs `compact`".
 
 Thread reads (`get-post-thread`, `get-mention-context`) and `get-notifications` always
 render in full — they return one thread or one notification at a time, where pruning would

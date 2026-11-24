@@ -68,6 +68,12 @@ stay at top level at their own position; they never nest inside a thread.
 
 ## Complete Specification Example
 
+The example below is the full rendering of every element: what thread reads
+(`get-post-thread`, `get-mention-context`) return, and what the feed list tools return with
+`detail="full"`. Those tools default to `detail="compact"`, which leaves out the `bsky_url`
+attribute and the `Engagement:` line and nothing else — see "Detail Levels: `full` vs
+`compact`" below.
+
 ```xml
 <posts>
   <!-- Example of a post with replies -->
@@ -259,28 +265,36 @@ Embeds are contained in `<embed>` tags with a type attribute:
 One vocabulary, one declaration: every `detail` parameter in `src/tools.ts` is built by the
 same `detailParam` factory from the `DetailLevel` type in `src/utils.ts`, so the values,
 their order and the default cannot drift between tools. The values are `"full"` and
-`"compact"`, and **`"full"` is the default everywhere**. `detail` selects how much of each
-entry is rendered; it is not a different format. What each level omits is a property of the
-payload, and each tool's own description states it.
+`"compact"`, and **`"compact"` is the default everywhere** — `DEFAULT_DETAIL`, declared once
+in `src/utils.ts`. `detail` selects how much of each entry is rendered; it is not a different
+format. What each level omits is a property of the payload, and each tool's own description
+states it.
 
 For the post lists — the feed entry points (`preprocessPosts`, `formatFeed`,
 `preprocessPost`) accept an options object with a `detail` field, and six read-heavy list
 tools expose it as a parameter (`get-timeline-posts`, `search-posts`, `get-liked-posts`,
 `get-feed-posts`, `get-list-posts`, `get-user-posts`):
 
-- **`full`** (default) — the whole format above, including the `bsky_url` attribute and the
-  `Engagement:` line of every post, repost and quoted post.
-- **`compact`** — the same walk with exactly two things removed from every post and every
-  `<quoted_post>`: the `bsky_url` attribute and the `Engagement:` line (and the blank line
-  that separated the content from it).
+- **`compact`** (the default the tools pass) — the same walk with exactly two things removed
+  from every post and every `<quoted_post>`: the `bsky_url` attribute and the `Engagement:`
+  line (and the blank line that separated the content from it).
+- **`full`** — the whole format above, including the `bsky_url` attribute and the
+  `Engagement:` line of every post, repost and quoted post. It is also what the formatter
+  entry points render when a caller passes no options at all: they are the spec-complete
+  rendering, and only the client-facing parameter defaults to compact.
 
 Everything else is byte-identical between the two levels: the `<posts>` container, `uri`,
 `type`, `author_name`/`author_handle`, `posted_at`/`reposted_at`, `reply_to`,
 `<content>`, every `<embed>` variant, `<repost>` nesting, `<quoted_post>` nesting, the
 thread grouping, and `<excluded_post>` tombstones (which never carried engagement or a web
-URL in the first place, so they render the same either way). `uri` is kept on purpose in
-compact mode: it is the argument the post-level tools (`get-post-thread`, `create-reply`,
-`like-post`) take, so a pruned read stays actionable.
+URL in the first place, so they render the same either way). The rule compact follows is that it may drop *detail* and never an *address*: the multiset of
+`uri=` and `reply_to=` attributes is identical in the two levels, and every element that is
+rendered at all is rendered with its `uri` — a plain post, a `<quoted_post>` and an
+`<excluded_post>` marker alike. `uri` is what the post-level tools (`get-post-thread`,
+`create-reply`, `like-post`) take as their argument, so a pruned read stays workable.
+Everything compact leaves out is recoverable: `bsky_url` is `BSKY_WEB_URL` +
+`author_handle` + the rkey of the `uri`, and the engagement counts come back with
+`detail="full"` or from a thread read, which always renders them.
 
 Measured on ordinary posts, compact mode saves about 107 characters per post — roughly 26%
 of a long post's rendered payload and closer to a third for short posts.
@@ -291,13 +305,13 @@ parameter: they return one thread or one notification per call, where the prunin
 save little and cost detail.
 
 `get-follows` takes the same parameter with the same default and defines the two levels for
-its own payload, which is a list of users rather than posts: `full` (default) renders one
-block per follow — display name, handle, DID, the follow record URI, bio, and
-follower/following/post counts — while `compact` renders one line per follow (handle,
-display name, DID and, on the authenticated user's own follows, the bracketed follow record
-URI), roughly 80 bytes per entry, which is what a list of thousands wants. That tool used to
-default to `"compact"`; unifying the vocabulary moved it to `"full"`, so a caller who wants
-the cheap form asks for it.
+its own payload, which is a list of users rather than posts: `compact` (default) renders one
+line per follow (handle, display name, DID and, on the authenticated user's own follows, the
+bracketed follow record URI), roughly 80 bytes per entry, which is what a list of thousands
+wants, while `detail="full"` renders one block per follow — display name, handle, DID, the
+follow record URI, bio, and follower/following/post counts. The compact line keeps the DID
+and the follow record URI, which is what `unfollow-user` takes, so the cheap form stays
+workable; a caller who wants the bios and counts asks for `full`.
 
 ### Hierarchical Structure
 - Replies nest in a `<replies>` section, inside the closing `</post>` tag of the post they respond to

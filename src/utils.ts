@@ -71,15 +71,35 @@ export interface McpErrorResponse {
 }
 
 /**
- * The one verbosity vocabulary the server exposes to clients: `"full"` (the
- * default everywhere) or `"compact"`. Every `detail` parameter in `tools.ts`
- * is built from this type, so a client can pass the same value to any
- * detail-aware tool and get the same level — what each level leaves out is
- * per payload (posts drop engagement and `bsky_url`; follows drop bios and
- * counts) and is stated in the tool's own parameter description, the same way
- * the cursor wording is per tool.
+ * The one verbosity vocabulary the server exposes to clients: `"full"` or
+ * `"compact"`. Every `detail` parameter in `tools.ts` is built from this type,
+ * so a client can pass the same value to any detail-aware tool and get the
+ * same level — what each level leaves out is per payload (posts drop
+ * engagement and `bsky_url`; follows drop bios and counts) and is stated in
+ * the tool's own parameter description, the same way the cursor wording is per
+ * tool.
  */
 export type DetailLevel = "full" | "compact";
+
+/**
+ * The level a detail-aware tool renders when the caller says nothing.
+ *
+ * Compact is the default because it is the level that keeps a large read
+ * inside what a client will actually render, and it gives up nothing a caller
+ * needs in order to act on what it shows: every rendered element still carries
+ * the handle the next tool call takes as its argument — `uri` on a post, on a
+ * quoted post and on an `<excluded_post>` marker alike, `reply_to` on a reply,
+ * `author_handle` on a repost, and the DID plus bracketed follow record URI on
+ * a follow. What it omits is either derivable (`bsky_url` is `BSKY_WEB_URL` +
+ * `author_handle` + the rkey of `uri`) or one call away: `detail="full"` on
+ * the same tool, or a thread read, which always renders engagement counts.
+ *
+ * Formatter entry points still default to `"full"` — they are the
+ * spec-complete rendering and callers that pass nothing should get the whole
+ * format. Only the client-facing parameter defaults to compact, and it is
+ * declared once, by `detailParam` in `tools.ts`.
+ */
+export const DEFAULT_DETAIL: DetailLevel = "compact";
 
 export function mcpLog(message: string): void {
   if (process.env.LOG_RESPONSES === 'true') {

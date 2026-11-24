@@ -155,7 +155,12 @@ function determinePostType(post: AppBskyFeedDefs.PostView): string[] {
  * either way. See `docs/post-format-spec.md`, "Detail levels".
  */
 export interface FeedFormatOptions {
-  /** Defaults to `"full"`, so callers that pass nothing are unchanged. */
+  /**
+   * Defaults to `"full"`, so callers that pass nothing get the whole format.
+   * The client-facing default is the other way round — `DEFAULT_DETAIL`
+   * (`"compact"`) in `utils.ts`, applied by the `detail` parameter every
+   * detail-aware tool declares — and those tools always pass a level here.
+   */
   detail?: DetailLevel;
 }
 

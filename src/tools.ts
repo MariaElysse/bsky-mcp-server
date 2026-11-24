@@ -19,6 +19,7 @@ import {
   mcpSuccessResponse,
   parsePostUri,
   type DetailLevel,
+  DEFAULT_DETAIL,
 } from './utils.js';
 import { preprocessPosts, formatPostThread, formatPostThreadWithAiPrefs, filterThreadByAiPreferences } from "./llm-preprocessor.js";
 import { fetchLinkMetadata, uploadThumbnail } from './link-preview.js';
@@ -44,23 +45,26 @@ const ANNOTATE_DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idemp
 /**
  * One `detail` parameter for every tool that can render at two levels, built
  * by this factory so the accepted values, their order, and the default cannot
- * drift between tools: `"full"` (the default) or `"compact"`, everywhere.
- * What each level leaves out is per payload, so the description is passed in —
- * the same way the cursor-signal wording is per tool.
+ * drift between tools: `"full"` or `"compact"`, with `DEFAULT_DETAIL`
+ * (`"compact"`) as the default everywhere. What each level leaves out is per
+ * payload, so the description is passed in — the same way the cursor-signal
+ * wording is per tool.
  *
- * For posts, `bsky_url` and the engagement line are a large share of the
- * tokens per post, and neither is something a summarizing caller acts on —
- * `uri` is the argument every other tool takes. For follows it is the bios
- * and counts that cost the most, which is why the follow description points
- * at `compact` for large lists.
+ * Compact is the default because it is what a large read needs, and it stays
+ * workable: every post, quoted post and `<excluded_post>` marker keeps the
+ * `uri` the post-level tools take, replies keep `reply_to`, reposts keep the
+ * reposter's handle, and a follow keeps its DID and its follow record URI.
+ * What it drops is engagement counts — returned by `detail='full'` or by a
+ * thread read, which always renders them — and `bsky_url`, which a client can
+ * still build from `author_handle` plus the rkey of `uri`.
  */
 const detailParam = (description: string) =>
-  z.enum(["full", "compact"]).default("full").describe(description);
+  z.enum(["full", "compact"]).default(DEFAULT_DETAIL).describe(description);
 
-const DETAIL_PARAM = detailParam("How much of each post to render. 'full' (default) includes engagement counts and bsky_url. 'compact' omits both and keeps uri, type, author, timestamps, content and embeds — post structure, thread grouping and hidden-post markers are identical either way.");
+const DETAIL_PARAM = detailParam("How much of each post to render. 'compact' (default) omits engagement counts and bsky_url and keeps uri, type, author, timestamps, content and embeds — post structure, thread grouping and hidden-post markers are identical either way. Pass 'full' to add both back.");
 
 /** Same levels as the post tools; bios and counts are what `compact` drops. */
-const FOLLOW_DETAIL_PARAM = detailParam("How much of each follow to render. 'full' (default) returns a block per user with handle, display name, DID, bio and counts. 'compact' returns one line per follow — handle, display name, DID and, for your own follows, the follow record URI — roughly 80 bytes per entry, which is what a large list wants; at large limits the full payload can exceed what some clients will render.");
+const FOLLOW_DETAIL_PARAM = detailParam("How much of each follow to render. 'compact' (default) returns one line per follow — handle, display name, DID and, for your own follows, the bracketed follow record URI that unfollow-user takes — roughly 80 bytes per entry, which is what a large list wants. Pass 'full' for a block per user with handle, display name, DID, bio and counts; at large limits that payload can exceed what some clients will render.");
 
 /**
  * Filter posts by the current user's AI preferences.
@@ -88,7 +92,9 @@ async function filterPostsByAiPrefs(
   agent: any,
   posts: any[],
   entityType: string = 'posts',
-  detail: DetailLevel = 'full'
+  // Required, not defaulted: the client-facing default is declared once, by
+  // `detailParam`, and every caller here passes the parameter it parsed.
+  detail: DetailLevel
 ): Promise<{ text: string; count: number }> {
   // Collect unique DIDs from post authors (skip tombstones)
   const didSet = new Set<string>();
@@ -194,7 +200,7 @@ export function registerTools(
 
   server.tool(
     "get-timeline-posts",
-    "Fetch your home timeline from Bluesky, which includes posts from all of the people you follow in reverse chronological order. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page. Set `detail='compact'` to drop engagement counts and web URLs from every post, which is materially cheaper on large reads.",
+    "Fetch your home timeline from Bluesky, which includes posts from all of the people you follow in reverse chronological order. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page. Posts render at `detail='compact'` by default, which drops engagement counts and web URLs from every post and is materially cheaper on large reads; pass `detail='full'` to add both back.",
     {
       count: z.number().min(1).max(500).default(20).describe("Number of posts to fetch (1-500). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
       type: z.enum(["posts", "hours"]).default("posts").describe("Whether count represents number of posts or hours to look back. In cursor mode, only 'posts' is supported."),
@@ -590,7 +596,7 @@ ${profile.labels?.length ? `Labels: ${profile.labels.map((l: any) => l.val).join
 
   server.tool(
     "search-posts",
-    "Search for posts on Bluesky. Note: Bluesky uses strict AND matching - all search terms must be present in a post for it to match. This differs from web search engines which use loose/fuzzy matching. Searching for 'a b c' requires ALL of a, b, AND c to appear in matching posts. Supported operators: from:handle, to:handle, mentions:handle, url:domain, lang:code (e.g., lang:en), has:images, has:video, has:link. Set `detail='compact'` to drop engagement counts and web URLs from every post, which is materially cheaper on large reads.",
+    "Search for posts on Bluesky. Note: Bluesky uses strict AND matching - all search terms must be present in a post for it to match. This differs from web search engines which use loose/fuzzy matching. Searching for 'a b c' requires ALL of a, b, AND c to appear in matching posts. Supported operators: from:handle, to:handle, mentions:handle, url:domain, lang:code (e.g., lang:en), has:images, has:video, has:link. Posts render at `detail='compact'` by default, which drops engagement counts and web URLs from every post and is materially cheaper on large reads; pass `detail='full'` to add both back.",
     {
       query: z.string().describe("Search query. Uses strict AND matching - all terms must match. Supported operators: from:, to:, mentions:, url:, lang:, has:images, has:video, has:link"),
       limit: z.number().min(1).max(100).default(50).describe("Number of results to fetch (1-100)"),
@@ -808,7 +814,7 @@ ${feed.indexedAt ? `Indexed At: ${new Date(feed.indexedAt).toLocaleString()}` : 
 
   server.tool(
     "get-liked-posts",
-    "Get a list of posts that the authenticated user has liked. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `limit` posts, or pass a cursor from a previous response to fetch the next page. Set `detail='compact'` to drop engagement counts and web URLs from every post, which is materially cheaper on large reads.",
+    "Get a list of posts that the authenticated user has liked. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `limit` posts, or pass a cursor from a previous response to fetch the next page. Posts render at `detail='compact'` by default, which drops engagement counts and web URLs from every post and is materially cheaper on large reads; pass `detail='full'` to add both back.",
     {
       limit: z.number().min(1).max(100).default(20).describe("Maximum number of liked posts to fetch (1-100). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
       cursor: z.string().optional().describe("Pagination cursor returned by a previous call. Omit on the first call."),
@@ -1269,7 +1275,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
   server.tool(
     "get-feed-posts",
-    "Fetch posts from a specified feed. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page. Set `detail='compact'` to drop engagement counts and web URLs from every post, which is materially cheaper on large reads.",
+    "Fetch posts from a specified feed. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page. Posts render at `detail='compact'` by default, which drops engagement counts and web URLs from every post and is materially cheaper on large reads; pass `detail='full'` to add both back.",
     {
       feed: z.string().describe("The URI of the feed to fetch posts from (e.g., at://did:plc:abcdef/app.bsky.feed.generator/whats-hot)"),
       count: z.number().min(1).max(500).default(20).describe("Number of posts to fetch (1-500). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
@@ -1399,7 +1405,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
   server.tool(
     "get-list-posts",
-    "Fetch posts from users in a specified list. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page. Set `detail='compact'` to drop engagement counts and web URLs from every post, which is materially cheaper on large reads.",
+    "Fetch posts from users in a specified list. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page. Posts render at `detail='compact'` by default, which drops engagement counts and web URLs from every post and is materially cheaper on large reads; pass `detail='full'` to add both back.",
     {
       list: z.string().describe("The URI of the list (e.g., at://did:plc:abcdef/app.bsky.graph.list/listname)"),
       count: z.number().min(1).max(500).default(20).describe("Number of posts to fetch (1-500). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
@@ -1529,7 +1535,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
   server.tool(
     "get-user-posts",
-    "Fetch posts from a specific user. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page. Set `detail='compact'` to drop engagement counts and web URLs from every post, which is materially cheaper on large reads.",
+    "Fetch posts from a specific user. Supports cursor-based pagination: omit `cursor` to auto-fetch up to `count` posts, or pass a cursor from a previous response to fetch the next page. Posts render at `detail='compact'` by default, which drops engagement counts and web URLs from every post and is materially cheaper on large reads; pass `detail='full'` to add both back.",
     {
       user: z.string().describe("The handle or DID of the user (e.g., alice.bsky.social)"),
       count: z.number().min(1).max(500).default(20).describe("Number of posts to fetch (1-500). When cursor is provided, this is the max posts returned from that page; when omitted, fetches up to this many posts."),
@@ -1672,7 +1678,7 @@ ${feed.purpose ? `Purpose: ${feed.purpose}` : ''}`;
 
   server.tool(
     "get-follows",
-    "Get one page of users that a person follows. For the authenticated user's own follows, reads records directly from their PDS (fast when colocated, surfaces the follow record URI needed for unfollow-user, and preserves deactivated/takedown follows that the AppView filters out); otherwise uses the AppView graph.getFollows endpoint. Returns a cursor that should be passed back in to fetch the next page. Set `detail='compact'` to render one line per follow instead of a block, which is materially cheaper on large lists.",
+    "Get one page of users that a person follows. For the authenticated user's own follows, reads records directly from their PDS (fast when colocated, surfaces the follow record URI needed for unfollow-user, and preserves deactivated/takedown follows that the AppView filters out); otherwise uses the AppView graph.getFollows endpoint. Returns a cursor that should be passed back in to fetch the next page. Renders one line per follow by default (`detail='compact'`), which is materially cheaper on large lists; pass `detail='full'` for a block per user with bio and counts.",
     {
       user: z.string().describe("The handle or DID of the user (e.g., alice.bsky.social)"),
       limit: z.number().min(1).max(500).default(100).describe("Maximum follows to return in this response (1-500). The tool loops the underlying PDS/AppView pagination (100/page) internally to fulfill larger requests. Raise this when you intend to dump the result to a file; keep it small when the output is meant to stay in the model's context."),
