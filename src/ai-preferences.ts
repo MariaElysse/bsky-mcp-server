@@ -416,8 +416,8 @@ export function filterPostsByAiPreferences(
   return { filtered, skippedCount: skipped };
 }
 
-// Re-export thread-related helpers from llm-preprocessor for test compatibility.
-// These are logically part of the AI preferences system (thread filtering).
+// Collect every author DID in a thread view (post, parent chain, replies) so a
+// caller can batch-check preferences before rendering it.
 export function getDidsFromThread(threadView: any): string[] {
   if (!threadView || typeof threadView !== 'object') return [];
   const dids: string[] = [];
